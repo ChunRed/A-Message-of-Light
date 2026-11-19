@@ -1,0 +1,179 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --paper: #faf9f6;
+  --foreground: #222222;
+  --muted: #8c8c8a;
+  --hairline: #e2e2de;
+  --ease-muji: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-noto-sans-tc), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html,
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 45-degree chamfered corner clip-path preserved for legacy utility usage */
+.hud-chamfer {
+  clip-path: polygon(
+    10px 0,
+    100% 0,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    0 100%,
+    0 10px
+  );
+}
+
+.hud-chamfer-sm {
+  clip-path: polygon(
+    6px 0,
+    100% 0,
+    100% calc(100% - 6px),
+    calc(100% - 6px) 100%,
+    0 100%,
+    0 6px
+  );
+}
+
+/* Quiet floating letter animation */
+@keyframes float-gentle {
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+@keyframes shadow-breathe {
+  0%,
+  100% {
+    transform: scaleX(1) scaleY(1);
+    opacity: 0.72;
+  }
+  50% {
+    transform: scaleX(0.92) scaleY(0.9);
+    opacity: 0.48;
+  }
+}
+
+/* Breathing indicator dot */
+@keyframes dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.45);
+    opacity: 0.25;
+  }
+}
+
+/* SVG line-growth animation (stroke-dashoffset) */
+@keyframes draw-line {
+  from {
+    stroke-dashoffset: var(--dash-len, 1600);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Subtle panel entrance */
+@keyframes muji-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.988);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes muji-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes clear-veil-sweep {
+  0% {
+    transform: translateX(-105%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(105%);
+    opacity: 0;
+  }
+}
+
+.animate-float-gentle {
+  animation: float-gentle 4.8s ease-in-out infinite;
+}
+
+.animate-shadow-breathe {
+  animation: shadow-breathe 4.8s ease-in-out infinite;
+}
+
+.animate-dot-pulse {
+  animation: dot-pulse 2.2s ease-in-out infinite;
+}
+
+.animate-draw-line {
+  stroke-dasharray: var(--dash-len, 1600);
+  stroke-dashoffset: var(--dash-len, 1600);
+  animation: draw-line 0.95s var(--ease-muji) forwards;
+}
+
+.animate-muji-fade-up {
+  animation: muji-fade-up 0.55s var(--ease-muji) both;
+}
+
+.animate-muji-modal-in {
+  animation: muji-modal-in 0.42s var(--ease-muji) both;
+}
+
+.animate-clear-sweep {
+  animation: clear-veil-sweep 0.46s var(--ease-muji) forwards;
+}
+
+/* 3D envelope flap */
+.envelope-scene {
+  perspective: 1100px;
+}
+
+.envelope-flap {
+  transform-origin: top center;
+  transform-style: preserve-3d;
+  transition: transform 0.62s var(--ease-muji);
+}
+
+.envelope-flap-open {
+  transform: rotateX(-168deg);
+}
