@@ -339,29 +339,39 @@ export function exportLetterAsJpg(
     ctx.stroke();
   }
 
-  // 5. Fine horizontal stationery writing guidelines (#E2E2DE)
-  const firstLineY = 78;
-  const bottomLimitY = safeH - 46;
-  const lineSpacing = 34;
+  // 5. Subtle square graph grid (very faint Muji grid stationery)
+  const gridTop = 74;
+  const gridBottom = safeH - 46;
+  const gridLeft = padX;
+  const gridRight = safeW - padX;
+  const gridStep = 24;
 
-  ctx.strokeStyle = "#E7E6E2";
-  ctx.lineWidth = 0.9;
-  for (let y = firstLineY; y <= bottomLimitY; y += lineSpacing) {
+  ctx.strokeStyle = "rgba(34, 34, 34, 0.065)";
+  ctx.lineWidth = 0.8;
+  // Horizontal grid lines
+  for (let y = gridTop; y <= gridBottom; y += gridStep) {
     ctx.beginPath();
-    ctx.moveTo(padX, Math.round(y) + 0.5);
-    ctx.lineTo(safeW - padX, Math.round(y) + 0.5);
+    ctx.moveTo(gridLeft, Math.round(y) + 0.5);
+    ctx.lineTo(gridRight, Math.round(y) + 0.5);
+    ctx.stroke();
+  }
+  // Vertical grid lines
+  for (let x = gridLeft; x <= gridRight; x += gridStep) {
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x) + 0.5, gridTop);
+    ctx.lineTo(Math.round(x) + 0.5, gridBottom);
     ctx.stroke();
   }
 
-  // 6. Subtle bottom-right watermark
+  // 6. Subtle bottom-left watermark (matches live stationery & 3D front panel)
   ctx.fillStyle = "#8C8C8A";
-  ctx.textAlign = "right";
+  ctx.textAlign = "left";
   ctx.textBaseline = "bottom";
   ctx.font = '300 10.5px "Noto Sans TC", sans-serif';
-  ctx.fillText("一則光的訊息", safeW - padX, safeH - 22);
+  ctx.fillText("一則光的訊息", padX, safeH - 22);
   ctx.font = '400 8px "IBM Plex Mono", ui-monospace, monospace';
   ctx.fillStyle = "rgba(140, 140, 138, 0.72)";
-  ctx.fillText("A MESSAGE OF LIGHT", safeW - padX, safeH - 11);
+  ctx.fillText("A MESSAGE OF LIGHT", padX, safeH - 11);
 
   // 7. Composite user's transparent crayon drawing layer cleanly on top
   ctx.drawImage(drawingCanvas, 0, 0, safeW, safeH);

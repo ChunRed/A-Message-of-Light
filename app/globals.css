@@ -177,3 +177,60 @@ body {
 .envelope-flap-open {
   transform: rotateX(-168deg);
 }
+
+/* Minimalist Muji 1px fine-line range slider */
+input[type="range"].muji-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].muji-slider:focus {
+  outline: none;
+}
+
+input[type="range"].muji-slider::-webkit-slider-runnable-track {
+  height: 1px;
+  background: #dcdcd7;
+}
+
+input[type="range"].muji-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -5px;
+  border-radius: 9999px;
+  border: 1.25px solid #222222;
+  background: #ffffff;
+  transition: transform 0.18s var(--ease-muji), background-color 0.18s var(--ease-muji);
+}
+
+input[type="range"].muji-slider:hover::-webkit-slider-thumb,
+input[type="range"].muji-slider:active::-webkit-slider-thumb {
+  background: #222222;
+  transform: scale(1.18);
+}
+
+input[type="range"].muji-slider::-moz-range-track {
+  height: 1px;
+  background: #dcdcd7;
+}
+
+input[type="range"].muji-slider::-moz-range-thumb {
+  width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  border: 1.25px solid #222222;
+  background: #ffffff;
+  transition: transform 0.18s var(--ease-muji), background-color 0.18s var(--ease-muji);
+}
+
+input[type="range"].muji-slider:hover::-moz-range-thumb,
+input[type="range"].muji-slider:active::-moz-range-thumb {
+  background: #222222;
+  transform: scale(1.18);
+}

@@ -213,6 +213,42 @@ export function EditBackIcon({ className = "", size = 15 }: IconProps) {
   );
 }
 
+export function BrushLabIcon({ className = "", size = 17 }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+    >
+      {/* Minimalist calligraphic nib + precision slider ticks */}
+      <path
+        d="M11.8 3.2L16.2 7.6L9.4 14.4L4.2 15.8L5.6 10.6L11.8 3.2Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.8 5.6L13.8 9.6"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+      <path
+        d="M4.2 17.2H16.2"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <circle cx="13" cy="17.2" r="1.4" fill="currentColor" />
+    </svg>
+  );
+}
+
 export function StampPostmarkDecoration({ className = "" }: { className?: string }) {
   return (
     <svg
