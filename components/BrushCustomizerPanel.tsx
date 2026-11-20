@@ -17,6 +17,7 @@ interface BrushCustomizerPanelProps {
   params: BrushParams;
   onChangeParams: (next: Partial<BrushParams>) => void;
   onSelectBrushType: (type: BrushType) => void;
+  className?: string;
 }
 
 export function BrushCustomizerPanel({
@@ -25,6 +26,7 @@ export function BrushCustomizerPanel({
   params,
   onChangeParams,
   onSelectBrushType,
+  className = "",
 }: BrushCustomizerPanelProps) {
   const previewWrapRef = useRef<HTMLDivElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -157,13 +159,12 @@ export function BrushCustomizerPanel({
     <div
       role="dialog"
       aria-label="筆刷實驗室 Brush Customizer"
-      className="animate-muji-modal-in absolute top-12 right-0 z-40 w-[min(90vw,312px)] border border-[#222222] bg-white p-3.5 text-[#222222] sm:top-13"
-      style={{
-        boxShadow: "0 18px 36px -28px rgba(34, 34, 34, 0.25)",
-      }}
+      className={`sketch-card animate-muji-modal-in absolute z-40 w-[min(92vw,320px)] border border-[#222222] bg-[#FDFCF9] p-3.5 text-[#222222] ${
+        className || "bottom-full left-1/2 mb-2.5 -translate-x-1/2 sm:left-0 sm:translate-x-0"
+      }`}
     >
       {/* Panel Header */}
-      <div className="mb-2.5 flex items-center justify-between border-b border-[#E2E2DE] pb-2">
+      <div className="mb-2.5 flex items-center justify-between border-b border-dashed border-[#222222]/20 pb-2">
         <div className="flex items-baseline gap-2">
           <span className="text-xs font-normal tracking-[0.18em] text-[#222222]">
             筆刷實驗室
@@ -176,7 +177,7 @@ export function BrushCustomizerPanel({
           type="button"
           onClick={onClose}
           aria-label="關閉筆刷實驗室"
-          className="flex h-6 w-6 items-center justify-center rounded-full border border-[#E2E2DE] text-[#222222] transition-colors hover:border-[#222222]"
+          className="sketch-pill flex h-6 w-6 items-center justify-center border border-[#222222]/30 bg-white text-[#222222] transition-colors hover:border-[#222222]"
         >
           <svg
             width="10"
@@ -186,7 +187,7 @@ export function BrushCustomizerPanel({
             aria-hidden="true"
           >
             <path
-              d="M2 2L8 8M8 2L2 8"
+              d="M2.1 2.2C4.2 4.1 6.1 6.2 8 7.9M7.9 2.1C5.9 4.3 4 6.1 2 8"
               stroke="currentColor"
               strokeWidth="1.4"
               strokeLinecap="round"
@@ -202,7 +203,7 @@ export function BrushCustomizerPanel({
           <button
             type="button"
             onClick={redrawDemoCurve}
-            className="text-[#8C8C8A] underline decoration-[#DCDCD7] underline-offset-2 transition-colors hover:text-[#222222]"
+            className="text-[#8C8C8A] underline decoration-[#DCDCD7] decoration-dashed underline-offset-2 transition-colors hover:text-[#222222]"
           >
             {hasUserTestDraw ? "重繪範例" : "框內可試畫"}
           </button>
@@ -210,7 +211,7 @@ export function BrushCustomizerPanel({
 
         <div
           ref={previewWrapRef}
-          className="relative h-[86px] w-full overflow-hidden border border-[#222222] bg-[#FAF9F6]"
+          className="sketch-card relative h-[86px] w-full overflow-hidden border border-[#222222] bg-[#FAF9F6]"
         >
           <canvas
             ref={previewCanvasRef}
@@ -248,10 +249,10 @@ export function BrushCustomizerPanel({
                 role="radio"
                 aria-checked={active}
                 onClick={() => onSelectBrushType(brush.id)}
-                className={`flex flex-col items-center justify-center rounded-lg border py-1.5 transition-all duration-200 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] active:scale-95 ${
+                className={`sketch-card flex flex-col items-center justify-center border py-1.5 transition-all duration-200 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] active:scale-95 ${
                   active
                     ? "border-[#222222] bg-[#222222] text-[#FAF9F6]"
-                    : "border-[#E2E2DE] bg-white text-[#222222] hover:border-[#222222]"
+                    : "border-[#222222]/25 bg-white text-[#222222] hover:border-[#222222]"
                 }`}
               >
                 <span className="text-[11px] font-normal tracking-[0.06em]">
@@ -267,7 +268,7 @@ export function BrushCustomizerPanel({
       </div>
 
       {/* 3. Four Fine-Line Parameter Sliders */}
-      <div className="space-y-2.5 border-t border-[#E2E2DE] pt-2.5">
+      <div className="space-y-2.5 border-t border-dashed border-[#222222]/20 pt-2.5">
         {/* Noise Size */}
         <SliderRow
           label="噪點大小"

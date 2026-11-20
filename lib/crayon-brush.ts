@@ -1,3 +1,11 @@
+import {
+  createSeededRng,
+  drawHandDrawnPostageStamp,
+  drawSketchyLine,
+  drawSketchyRect,
+  drawWashiPaperTexture,
+} from "@/lib/hand-drawn-utils";
+
 export interface CrayonColor {
   id: string;
   name: string;
@@ -6,11 +14,16 @@ export interface CrayonColor {
 
 export const CRAYON_COLORS: CrayonColor[] = [
   { id: "charcoal", name: "炭墨黑", hex: "#222222" },
+  { id: "warm-gray", name: "暖石炭", hex: "#6E6D6A" },
+  { id: "umber", name: "焦糖褐", hex: "#8F654D" },
   { id: "terracotta", name: "暖陶紅", hex: "#C86D51" },
+  { id: "blush", name: "柔粉橘", hex: "#D98A7C" },
+  { id: "dusty-rose", name: "枯玫瑰", hex: "#B87A88" },
   { id: "mustard", name: "芥末黃", hex: "#D4A84B" },
+  { id: "olive", name: "橄欖綠", hex: "#8A9A5B" },
   { id: "sage", name: "鼠尾草綠", hex: "#6E8B74" },
   { id: "slate", name: "霧灰藍", hex: "#5B7A8C" },
-  { id: "blush", name: "柔粉橘", hex: "#D98A7C" },
+  { id: "mauve", name: "暮紫灰", hex: "#7D6E83" },
 ];
 
 export interface SizeOption {
@@ -239,141 +252,96 @@ export function exportLetterAsJpg(
   ctx.save();
   ctx.scale(scale, scale);
 
-  // 1. Warm off-white Muji paper base (#FAF9F6)
-  ctx.fillStyle = "#FAF9F6";
-  ctx.fillRect(0, 0, safeW, safeH);
+  const rng = createSeededRng(20261120);
 
-  // 2. Subtle organic cotton paper speckles
-  const speckCount = Math.round((safeW * safeH) / 140);
-  for (let i = 0; i < speckCount; i++) {
-    const sx = ((i * 7919) % 10000) / 10000 * safeW;
-    const sy = ((i * 104729) % 10000) / 10000 * safeH;
-    ctx.fillStyle =
-      i % 2 === 0 ? "rgba(34, 34, 34, 0.022)" : "rgba(140, 140, 138, 0.028)";
-    ctx.fillRect(sx, sy, 1, 1);
-  }
+  // 1. Handmade cotton / washi paper grain, subtle tonal clouds & organic fibers
+  drawWashiPaperTexture(ctx, safeW, safeH, 20261120);
 
-  // 3. Outer subtle stationery border & corner crop marks
-  ctx.strokeStyle = "#E2E2DE";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, safeW - 1, safeH - 1);
+  // 2. Hand-sketched outer stationery hairline & corner crop marks
+  drawSketchyRect(ctx, 1, 1, safeW - 2, safeH - 2, rng, {
+    stepPx: 14,
+    jitterAmp: 0.45,
+    lineWidth: 0.9,
+    strokeStyle: "#D8D7D1",
+  });
 
   const crop = 10;
   const inset = 12;
-  ctx.strokeStyle = "rgba(34, 34, 34, 0.35)";
-  ctx.lineWidth = 0.8;
-  // Top-left crop tick
-  ctx.beginPath();
-  ctx.moveTo(inset, inset + crop);
-  ctx.lineTo(inset, inset);
-  ctx.lineTo(inset + crop, inset);
-  // Top-right
-  ctx.moveTo(safeW - inset - crop, inset);
-  ctx.lineTo(safeW - inset, inset);
-  ctx.lineTo(safeW - inset, inset + crop);
-  // Bottom-left
-  ctx.moveTo(inset, safeH - inset - crop);
-  ctx.lineTo(inset, safeH - inset);
-  ctx.lineTo(inset + crop, safeH - inset);
-  // Bottom-right
-  ctx.moveTo(safeW - inset - crop, safeH - inset);
-  ctx.lineTo(safeW - inset, safeH - inset);
-  ctx.lineTo(safeW - inset, safeH - inset - crop);
-  ctx.stroke();
+  const cropOpts = {
+    stepPx: 5,
+    jitterAmp: 0.42,
+    lineWidth: 0.85,
+    strokeStyle: "rgba(34, 34, 34, 0.36)",
+    overshoot: 1.0,
+  };
+  drawSketchyLine(ctx, inset, inset + crop, inset, inset, rng, cropOpts);
+  drawSketchyLine(ctx, inset, inset, inset + crop, inset, rng, cropOpts);
+  drawSketchyLine(ctx, safeW - inset - crop, inset, safeW - inset, inset, rng, cropOpts);
+  drawSketchyLine(ctx, safeW - inset, inset, safeW - inset, inset + crop, rng, cropOpts);
+  drawSketchyLine(ctx, inset, safeH - inset - crop, inset, safeH - inset, rng, cropOpts);
+  drawSketchyLine(ctx, inset, safeH - inset, inset + crop, safeH - inset, rng, cropOpts);
+  drawSketchyLine(ctx, safeW - inset - crop, safeH - inset, safeW - inset, safeH - inset, rng, cropOpts);
+  drawSketchyLine(ctx, safeW - inset, safeH - inset, safeW - inset, safeH - inset - crop, rng, cropOpts);
 
-  // 4. Stationery top header (Date stamp + Minimalist Stamp & Postmark)
+  // 3. Stationery top header (Date stamp + sketchy underline + hand-drawn Stamp & Postmark)
   const padX = Math.max(24, safeW * 0.065);
   const headerY = 34;
 
-  ctx.fillStyle = "#8C8C8A";
+  ctx.fillStyle = "#7D7D7A";
   ctx.font = '400 10px "IBM Plex Mono", ui-monospace, monospace';
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   ctx.fillText(`DATE // ${dateStamp}`, padX, headerY);
+  drawSketchyLine(ctx, padX, headerY + 9, padX + 114, headerY + 9, rng, {
+    stepPx: 8,
+    jitterAmp: 0.38,
+    lineWidth: 0.65,
+    strokeStyle: "rgba(34, 34, 34, 0.16)",
+  });
 
-  // Minimalist stamp rectangle on top-right
-  const stampW = 34;
-  const stampH = 42;
+  const stampW = 35;
+  const stampH = 43;
   const stampX = safeW - padX - stampW;
-  const stampY = 20;
+  const stampY = 19;
+  drawHandDrawnPostageStamp(ctx, stampX, stampY, stampW, stampH, 1, rng);
 
-  ctx.strokeStyle = "#C9C9C4";
-  ctx.lineWidth = 1;
-  ctx.setLineDash([2, 2]);
-  ctx.strokeRect(stampX, stampY, stampW, stampH);
-  ctx.setLineDash([]);
-  ctx.strokeStyle = "#E2E2DE";
-  ctx.strokeRect(stampX + 4, stampY + 4, stampW - 8, stampH - 8);
-
-  // Tiny geometric sun/light rays inside stamp
-  const sunX = stampX + stampW / 2;
-  const sunY = stampY + stampH / 2;
-  ctx.strokeStyle = "#8C8C8A";
-  ctx.lineWidth = 0.9;
-  ctx.beginPath();
-  ctx.arc(sunX, sunY, 4.2, 0, Math.PI * 2);
-  ctx.stroke();
-  for (let a = 0; a < 8; a++) {
-    const rad = (a * Math.PI) / 4;
-    ctx.beginPath();
-    ctx.moveTo(sunX + Math.cos(rad) * 6.5, sunY + Math.sin(rad) * 6.5);
-    ctx.lineTo(sunX + Math.cos(rad) * 9, sunY + Math.sin(rad) * 9);
-    ctx.stroke();
-  }
-
-  // Wavy postmark lines overlapping left edge of stamp
-  ctx.strokeStyle = "rgba(140, 140, 138, 0.5)";
-  ctx.lineWidth = 0.8;
-  for (let w = 0; w < 3; w++) {
-    const wy = stampY + 13 + w * 7;
-    ctx.beginPath();
-    ctx.moveTo(stampX - 26, wy);
-    ctx.bezierCurveTo(
-      stampX - 18,
-      wy - 3,
-      stampX - 10,
-      wy + 3,
-      stampX - 2,
-      wy
-    );
-    ctx.stroke();
-  }
-
-  // 5. Subtle square graph grid (very faint Muji grid stationery)
+  // 4. Hand-ruled jittery square graph grid (Muji cotton stationery)
   const gridTop = 74;
   const gridBottom = safeH - 46;
   const gridLeft = padX;
   const gridRight = safeW - padX;
   const gridStep = 24;
 
-  ctx.strokeStyle = "rgba(34, 34, 34, 0.065)";
-  ctx.lineWidth = 0.8;
-  // Horizontal grid lines
   for (let y = gridTop; y <= gridBottom; y += gridStep) {
-    ctx.beginPath();
-    ctx.moveTo(gridLeft, Math.round(y) + 0.5);
-    ctx.lineTo(gridRight, Math.round(y) + 0.5);
-    ctx.stroke();
+    drawSketchyLine(ctx, gridLeft, y, gridRight, y, rng, {
+      stepPx: 14,
+      jitterAmp: 0.45,
+      lineWidth: 0.72,
+      strokeStyle: "rgba(34, 34, 34, 0.08)",
+      overshoot: 1.0,
+    });
   }
-  // Vertical grid lines
   for (let x = gridLeft; x <= gridRight; x += gridStep) {
-    ctx.beginPath();
-    ctx.moveTo(Math.round(x) + 0.5, gridTop);
-    ctx.lineTo(Math.round(x) + 0.5, gridBottom);
-    ctx.stroke();
+    drawSketchyLine(ctx, x, gridTop, x, gridBottom, rng, {
+      stepPx: 14,
+      jitterAmp: 0.45,
+      lineWidth: 0.72,
+      strokeStyle: "rgba(34, 34, 34, 0.08)",
+      overshoot: 1.0,
+    });
   }
 
-  // 6. Subtle bottom-left watermark (matches live stationery & 3D front panel)
-  ctx.fillStyle = "#8C8C8A";
+  // 5. Subtle bottom-left watermark (matches live stationery & 3D front panel)
+  ctx.fillStyle = "#7D7D7A";
   ctx.textAlign = "left";
   ctx.textBaseline = "bottom";
   ctx.font = '300 10.5px "Noto Sans TC", sans-serif';
   ctx.fillText("一則光的訊息", padX, safeH - 22);
   ctx.font = '400 8px "IBM Plex Mono", ui-monospace, monospace';
-  ctx.fillStyle = "rgba(140, 140, 138, 0.72)";
+  ctx.fillStyle = "rgba(125, 125, 122, 0.78)";
   ctx.fillText("A MESSAGE OF LIGHT", padX, safeH - 11);
 
-  // 7. Composite user's transparent crayon drawing layer cleanly on top
+  // 6. Composite user's transparent crayon drawing layer cleanly on top
   ctx.drawImage(drawingCanvas, 0, 0, safeW, safeH);
 
   ctx.restore();
