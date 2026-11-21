@@ -1,0 +1,23 @@
+{
+  "name": "light-msg-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Express backend for A Message of Light (Cloudflare R2 Presigned Upload + Supabase Images API)",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@aws-sdk/s3-request-presigner": "^3.758.0",
+    "@supabase/supabase-js": "^2.49.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

@@ -399,3 +399,46 @@ export function StampPostmarkDecoration({ className = "" }: { className?: string
     </svg>
   );
 }
+
+export function LibraryIcon({ className = "", size = 15 }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 20 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+    >
+      <path
+        d="M3.2 3.5C5.4 3.3 7.1 3.5 8.6 3.4C8.7 5.3 8.5 7 8.6 8.6C6.8 8.7 5 8.5 3.3 8.6C3.2 6.8 3.4 5.1 3.2 3.5Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.4 3.4C13.4 3.6 15.1 3.3 16.7 3.5C16.6 5.4 16.8 7 16.6 8.5C14.8 8.6 13.1 8.5 11.4 8.6C11.5 6.8 11.3 5.1 11.4 3.4Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M3.3 11.5C5.2 11.3 6.9 11.6 8.5 11.4C8.6 13.3 8.5 15 8.6 16.6C6.7 16.7 5 16.5 3.4 16.6C3.3 14.8 3.5 13.1 3.3 11.5Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.5 11.4C13.3 11.6 15 11.3 16.6 11.5C16.7 13.4 16.5 15 16.7 16.6C14.8 16.5 13.2 16.7 11.4 16.5C11.6 14.8 11.4 13.2 11.5 11.4Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}

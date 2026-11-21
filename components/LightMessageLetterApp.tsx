@@ -5,6 +5,7 @@ import {
   CRAYON_COLORS,
   drawEraserSegment,
   exportLetterAsJpg,
+  exportLetterAsWebpBlob,
   getFormattedDateStamp,
   SIZE_OPTIONS,
 } from "@/lib/crayon-brush";
@@ -23,9 +24,14 @@ import {
   sampleDrawingToGridAnd30Led,
 } from "@/lib/grid-sampling";
 import {
+  UploadProgressPhase,
+  uploadWebpBlobToLibrary,
+} from "@/lib/image-library-api";
+import {
   BrushLabIcon,
   DownloadIcon,
   EraserIcon,
+  LibraryIcon,
   PaperPlaneIcon,
   PenTipIcon,
   RedoIcon,
@@ -40,6 +46,7 @@ import {
 } from "@/components/ZFoldLetterScene";
 import { BrushCustomizerPanel } from "@/components/BrushCustomizerPanel";
 import { GridSamplingOverlay } from "@/components/GridSamplingOverlay";
+import { LetterLibraryView } from "@/components/LetterLibraryView";
 import {
   SparkleColorTriplet,
   SparkleOverlayHandle,
@@ -54,6 +61,12 @@ type PostSendStage =
   | "dissolving"
   | "enveloping"
   | "returning";
+
+type UploadStatusState =
+  | { state: "idle" }
+  | { state: "uploading"; phase: UploadProgressPhase }
+  | { state: "success"; url: string }
+  | { state: "error"; message: string; canRetry: boolean };
 
 const MAX_HISTORY = 5;
 
@@ -92,6 +105,13 @@ export function LightMessageLetterApp() {
     useState<GridSamplingResult | null>(null);
   const [isRefoldDragging, setIsRefoldDragging] = useState<boolean>(false);
 
+  // Cloud R2 upload status & Library page view state
+  const [isLibraryOpen, setIsLibraryOpen] = useState<boolean>(false);
+  const [libraryRefreshSignal, setLibraryRefreshSignal] = useState<number>(0);
+  const [uploadStatus, setUploadStatus] = useState<UploadStatusState>({
+    state: "idle",
+  });
+
   // Eraser dashed circle cursor state
   const [eraserCursor, setEraserCursor] = useState<{
     x: number;
@@ -104,6 +124,9 @@ export function LightMessageLetterApp() {
   const sparkleRef = useRef<SparkleOverlayHandle | null>(null);
   const dissolvePaletteRef = useRef<SparkleColorTriplet[]>([]);
   const stageTimerRef = useRef<number | null>(null);
+  const uploadToastTimerRef = useRef<number | null>(null);
+  const pendingWebpPromiseRef = useRef<Promise<Blob> | null>(null);
+  const lastUploadBlobRef = useRef<Blob | null>(null);
   const paperBoxRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasSizeRef = useRef<{ width: number; height: number; dpr: number }>({
@@ -598,15 +621,68 @@ export function LightMessageLetterApp() {
     }, 480);
   }, [hasStrokes, isClearing, postSendStage, pushHistorySnapshot]);
 
-  // Cleanup any pending choreography timer on unmount
+  // Cleanup any pending choreography / toast timers on unmount
   useEffect(() => {
     return () => {
       if (stageTimerRef.current !== null) {
         window.clearTimeout(stageTimerRef.current);
         stageTimerRef.current = null;
       }
+      if (uploadToastTimerRef.current !== null) {
+        window.clearTimeout(uploadToastTimerRef.current);
+        uploadToastTimerRef.current = null;
+      }
     };
   }, []);
+
+  // =========================================================================
+  // DIRECT-TO-R2 WEBP UPLOAD + SUPABASE DB PERSISTENCE
+  // Binary WebP Blob uploads directly from browser -> Cloudflare R2 (never via Node)
+  // =========================================================================
+  const runDirectR2Upload = useCallback(async (blob: Blob) => {
+    if (uploadToastTimerRef.current !== null) {
+      window.clearTimeout(uploadToastTimerRef.current);
+      uploadToastTimerRef.current = null;
+    }
+
+    lastUploadBlobRef.current = blob;
+    setUploadStatus({ state: "uploading", phase: "requesting-url" });
+
+    try {
+      const safeStamp = dateStamp.replace(/\./g, "-");
+      const savedRow = await uploadWebpBlobToLibrary(
+        blob,
+        `light-message-${safeStamp}.webp`,
+        (phase) => {
+          setUploadStatus({ state: "uploading", phase });
+        }
+      );
+
+      lastUploadBlobRef.current = null;
+      setLibraryRefreshSignal((n) => n + 1);
+      setUploadStatus({ state: "success", url: savedRow.url });
+
+      uploadToastTimerRef.current = window.setTimeout(() => {
+        setUploadStatus((prev) =>
+          prev.state === "success" ? { state: "idle" } : prev
+        );
+      }, 5500);
+    } catch (err) {
+      console.error("[Light-msg Upload Error]", err);
+      setUploadStatus({
+        state: "error",
+        message:
+          err instanceof Error ? err.message : "圖片上傳失敗，請檢查網路或重試",
+        canRetry: true,
+      });
+    }
+  }, [dateStamp]);
+
+  const handleRetryUpload = useCallback(() => {
+    const blob = lastUploadBlobRef.current;
+    if (!blob) return;
+    void runDirectR2Upload(blob);
+  }, [runDirectR2Upload]);
 
   // =========================================================================
   // STAGE 4.2: RESET LOOP BACK TO FRESH 85%–90% BLANK 3D Z-FOLD LETTER
@@ -664,11 +740,20 @@ export function LightMessageLetterApp() {
     const { width, height } = canvasSizeRef.current;
 
     // 0ms: Synchronously composite stationery + original strokes into high-res JPG
+    // AND asynchronously prepare `image/webp` (quality 0.85) Blob for direct R2 upload
     try {
       const fullArtworkJpg = exportLetterAsJpg(canvas, width, height, dateStamp);
       setSavedLetterJpg(fullArtworkJpg);
+      pendingWebpPromiseRef.current = exportLetterAsWebpBlob(
+        canvas,
+        width,
+        height,
+        dateStamp,
+        0.85
+      );
     } catch (err) {
-      console.error("Failed to snapshot pre-sampling letter JPG:", err);
+      console.error("Failed to snapshot pre-sampling letter:", err);
+      pendingWebpPromiseRef.current = null;
     }
 
     // Quantize stationery grid cells & compute 30-CH [0..255] LED brightness sequence
@@ -697,6 +782,7 @@ export function LightMessageLetterApp() {
       stageTimerRef.current = null;
     }
     sparkleRef.current?.fadeOutAndClear(true);
+    pendingWebpPromiseRef.current = null;
     setSamplingResult(null);
     setSavedLetterJpg(null);
     setPostSendStage("idle");
@@ -704,13 +790,11 @@ export function LightMessageLetterApp() {
 
   // =========================================================================
   // STAGE 3 & STAGE 4 (SPARKLES, GLOW & RAYS START HERE AFTER SAVE CONFIRMATION):
-  // 1) Activate ambient luminous aura + dissolve hand-drawn strokes into color-matched
-  //    starbursts (charcoal #222222 -> #FFF4D2) + fade out lower 30-CH strip
-  // 2) 3D 65° Z-fold half-fold (0.6s) -> Left/Right pendulum showcase (1.8s)
-  //    -> Press flat -> Slide into 1px wireframe envelope & seal (sparkles continuously)
-  // 3) 0.2s pause -> Pure vertical upward flight (0.7s, X = 0) with trailing sparkles
-  // 4) After envelope exits completely -> fade sparkles & brighten bg back to white
-  //    -> reset to fresh 85%-90% 3D Z-fold letter
+  // 1) Upload WebP (0.85) directly to Cloudflare R2 & save record to Supabase
+  // 2) Dissolve hand-drawn strokes into color-matched crayon starbursts + fade strip
+  // 3) 3D 65° Z-fold half-fold -> Left/Right pendulum showcase -> Press flat
+  //    -> Slide into 1px wireframe envelope & seal -> Pure vertical upward flight
+  // 4) After envelope exits -> brighten bg back to white & reset loop
   // =========================================================================
   const startStage3DissolveAndSend = useCallback(() => {
     const canvas = canvasRef.current;
@@ -726,7 +810,24 @@ export function LightMessageLetterApp() {
           }
         : null;
 
-    // 1. Activate luminous ambient starbursts & transform strokes into color-matched sparkles
+    // 0. Kick off direct-to-R2 WebP upload & Supabase DB save in parallel with animation
+    const webpPromise = pendingWebpPromiseRef.current;
+    pendingWebpPromiseRef.current = null;
+    if (webpPromise) {
+      webpPromise
+        .then((blob) => runDirectR2Upload(blob))
+        .catch((err) => {
+          console.error("Failed to generate WebP blob:", err);
+          setUploadStatus({
+            state: "error",
+            message:
+              err instanceof Error ? err.message : "圖片轉換為 WebP 失敗",
+            canRetry: false,
+          });
+        });
+    }
+
+    // 1. Activate hand-drawn ambient stars & transform strokes into color-matched motifs
     sparkleRef.current?.setAmbientActive(true, normalizedRect);
 
     if (canvas && normalizedRect) {
@@ -769,7 +870,7 @@ export function LightMessageLetterApp() {
         }
       );
     }, 1020);
-  }, [paperTargetRect, resetToFreshLoop]);
+  }, [paperTargetRect, resetToFreshLoop, runDirectR2Upload]);
 
   // Stage 2 Action 1: Download full hand-drawn letter JPG -> immediately launch Stage 3
   const handleSaveAndProceedToEnvelope = useCallback(() => {
@@ -900,6 +1001,7 @@ export function LightMessageLetterApp() {
         dateStamp={dateStamp}
         targetBoxRect={paperTargetRect}
         onModeChange={handleSceneModeChange}
+        onOpenLibrary={() => setIsLibraryOpen(true)}
       />
 
       {/* ================================================================= */}
@@ -908,7 +1010,7 @@ export function LightMessageLetterApp() {
       <div className="pointer-events-none relative z-20 flex h-full w-full flex-col items-center justify-between px-3 pt-3 pb-3 sm:px-6 sm:pt-4 sm:pb-5">
         {/* Minimalist Top Bar (locks & fades cleanly during post-send choreography) */}
         <header
-          className={`flex w-full max-w-[680px] shrink-0 items-center justify-between pb-2 transition-opacity duration-300 ${
+          className={`flex w-full max-w-[680px] shrink-0 items-center justify-between gap-2 pb-2 transition-opacity duration-300 ${
             isFlatEditable
               ? "pointer-events-auto opacity-100"
               : "pointer-events-none opacity-0"
@@ -922,11 +1024,25 @@ export function LightMessageLetterApp() {
               A MESSAGE OF LIGHT
             </span>
           </div>
-          <span className="font-mono text-[10px] tracking-[0.18em] text-[#8C8C8A]">
-            {tool === "eraser"
-              ? `ERASER · ${currentSize.eraserDiameter}px`
-              : `${currentBrushMeta.enLabel} · #${String(randomSeed).padStart(4, "0")}`}
-          </span>
+          <div className="flex items-center gap-2.5">
+            <span className="hidden font-mono text-[10px] tracking-[0.18em] text-[#8C8C8A] sm:inline">
+              {tool === "eraser"
+                ? `ERASER · ${currentSize.eraserDiameter}px`
+                : `${currentBrushMeta.enLabel} · #${String(randomSeed).padStart(4, "0")}`}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setIsBrushLabOpen(false);
+                setIsLibraryOpen(true);
+              }}
+              aria-label="開啟光之圖庫 Library"
+              className="sketch-pill inline-flex h-7 items-center gap-1.5 border border-[#222222] bg-[#FDFCF9] px-3 text-[11px] font-normal tracking-[0.14em] text-[#222222] transition-colors hover:bg-[#222222] hover:text-[#FAF9F6] active:scale-[0.97]"
+            >
+              <LibraryIcon size={13} />
+              <span>Library</span>
+            </button>
+          </div>
         </header>
 
         {/* Center Paper Slot (exact pixel target for 3D flattened letter & Stage 1 scan) */}
@@ -1388,6 +1504,103 @@ export function LightMessageLetterApp() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* DIRECT-TO-R2 UPLOAD STATUS TOAST (UPLOADING / SUCCESS / ERROR)    */}
+      {/* ================================================================= */}
+      {uploadStatus.state !== "idle" && !isLibraryOpen && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none fixed inset-x-0 top-4 z-50 flex justify-center px-3 sm:top-5"
+        >
+          <div
+            className={`animate-muji-modal-in pointer-events-auto flex max-w-[92vw] items-center gap-2.5 border px-3.5 py-2 text-xs transition-colors duration-300 ${
+              isDarkAtmosphere
+                ? "sketch-card-dark border-[#FAF9F6]/70 bg-[#121215]/95 text-[#FAF9F6]"
+                : "sketch-card border-[#222222] bg-[#FDFCF9]/95 text-[#222222]"
+            }`}
+          >
+            {uploadStatus.state === "uploading" && (
+              <>
+                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-current border-t-transparent" />
+                <span className="tracking-[0.12em]">
+                  {uploadStatus.phase === "requesting-url"
+                    ? "正在準備雲端上傳連結…"
+                    : uploadStatus.phase === "uploading-r2"
+                      ? "正在直傳 WebP 信紙至雲端…"
+                      : "正在收錄至光之圖庫…"}
+                </span>
+              </>
+            )}
+
+            {uploadStatus.state === "success" && (
+              <>
+                <span
+                  aria-hidden="true"
+                  className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                    isDarkAtmosphere ? "bg-[#F3D98B]" : "bg-[#222222]"
+                  }`}
+                />
+                <span className="tracking-[0.12em]">已收錄至光之圖庫</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUploadStatus({ state: "idle" });
+                    setIsLibraryOpen(true);
+                  }}
+                  className={`ml-1 rounded-full border px-2.5 py-0.5 text-[10.5px] tracking-[0.12em] transition-colors ${
+                    isDarkAtmosphere
+                      ? "border-[#F3D98B] text-[#F3D98B] hover:bg-[#F3D98B] hover:text-[#121215]"
+                      : "border-[#222222] text-[#222222] hover:bg-[#222222] hover:text-[#FAF9F6]"
+                  }`}
+                >
+                  查看 Library
+                </button>
+              </>
+            )}
+
+            {uploadStatus.state === "error" && (
+              <>
+                <span className="max-w-[210px] truncate tracking-[0.08em] text-[#DF7A5E] sm:max-w-[300px]">
+                  上傳失敗：{uploadStatus.message}
+                </span>
+                {uploadStatus.canRetry && (
+                  <button
+                    type="button"
+                    onClick={handleRetryUpload}
+                    className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[10.5px] tracking-[0.12em] transition-colors ${
+                      isDarkAtmosphere
+                        ? "border-[#FAF9F6]/75 text-[#FAF9F6] hover:bg-[#FAF9F6] hover:text-[#121215]"
+                        : "border-[#222222] text-[#222222] hover:bg-[#222222] hover:text-[#FAF9F6]"
+                    }`}
+                  >
+                    重試
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setUploadStatus({ state: "idle" })}
+                  aria-label="關閉錯誤提示"
+                  className="ml-0.5 shrink-0 opacity-65 transition-opacity hover:opacity-100"
+                >
+                  ✕
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* LIBRARY PAGE VIEW (RESPONSIVE GRID + LIGHTBOX + LOAD MORE)        */}
+      {/* ================================================================= */}
+      {isLibraryOpen && (
+        <LetterLibraryView
+          onClose={() => setIsLibraryOpen(false)}
+          refreshSignal={libraryRefreshSignal}
+        />
       )}
     </div>
   );

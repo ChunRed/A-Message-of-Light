@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+Server/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -19,6 +20,7 @@
 
 # production
 /build
+light-msg-server-eb.zip
 
 # misc
 .DS_Store
@@ -32,6 +34,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+Server/.env.local
 
 # vercel
 .vercel

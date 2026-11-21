@@ -222,16 +222,15 @@ export function getFormattedDateStamp(): string {
 }
 
 /**
- * Composites the Muji stationery paper background (texture, guidelines, stamp, watermark)
- * with the user's transparent crayon drawing canvas onto an offscreen high-res canvas,
- * and exports as a high-quality JPG data URL.
+ * Renders the Muji hand-drawn cotton stationery paper background + user's transparent
+ * drawing canvas onto a single high-resolution offscreen canvas.
  */
-export function exportLetterAsJpg(
+export function renderLetterOffscreenCanvas(
   drawingCanvas: HTMLCanvasElement,
   displayWidth: number,
   displayHeight: number,
   dateStamp: string
-): string {
+): HTMLCanvasElement {
   const safeW = Math.max(320, displayWidth);
   const safeH = Math.max(320, displayHeight);
 
@@ -345,6 +344,56 @@ export function exportLetterAsJpg(
   ctx.drawImage(drawingCanvas, 0, 0, safeW, safeH);
 
   ctx.restore();
+  return offscreen;
+}
 
+/**
+ * Exports the rendered stationery + drawing as a high-quality JPG Data URL for local download.
+ */
+export function exportLetterAsJpg(
+  drawingCanvas: HTMLCanvasElement,
+  displayWidth: number,
+  displayHeight: number,
+  dateStamp: string
+): string {
+  const offscreen = renderLetterOffscreenCanvas(
+    drawingCanvas,
+    displayWidth,
+    displayHeight,
+    dateStamp
+  );
   return offscreen.toDataURL("image/jpeg", 0.94);
+}
+
+/**
+ * Exports the rendered stationery + drawing directly as an `image/webp` Blob (quality = 0.85)
+ * for direct-to-Cloudflare-R2 upload.
+ */
+export function exportLetterAsWebpBlob(
+  drawingCanvas: HTMLCanvasElement,
+  displayWidth: number,
+  displayHeight: number,
+  dateStamp: string,
+  quality = 0.85
+): Promise<Blob> {
+  const offscreen = renderLetterOffscreenCanvas(
+    drawingCanvas,
+    displayWidth,
+    displayHeight,
+    dateStamp
+  );
+
+  return new Promise<Blob>((resolve, reject) => {
+    offscreen.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("無法將信紙轉為 image/webp 格式"));
+          return;
+        }
+        resolve(blob);
+      },
+      "image/webp",
+      quality
+    );
+  });
 }

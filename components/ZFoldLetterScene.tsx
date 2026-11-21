@@ -20,6 +20,7 @@ import {
   drawSketchyLine,
   drawWashiPaperTexture,
 } from "@/lib/hand-drawn-utils";
+import { LibraryIcon } from "@/components/LetterIcons";
 
 export interface TargetPaperRect {
   left: number;
@@ -78,6 +79,7 @@ interface ZFoldLetterSceneProps {
   dateStamp: string;
   targetBoxRect: TargetPaperRect | null;
   onModeChange: (mode: LetterSceneMode) => void;
+  onOpenLibrary?: () => void;
 }
 
 const UNFOLD_THRESHOLD = 0.62;
@@ -346,7 +348,10 @@ function createFlatShadowTexture(): THREE.CanvasTexture {
 export const ZFoldLetterScene = forwardRef<
   ZFoldSceneHandle,
   ZFoldLetterSceneProps
->(function ZFoldLetterScene({ dateStamp, targetBoxRect, onModeChange }, ref) {
+>(function ZFoldLetterScene(
+  { dateStamp, targetBoxRect, onModeChange, onOpenLibrary },
+  ref
+) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [uiProgress, setUiProgress] = useState<number>(0);
   const [isDraggingPull, setIsDraggingPull] = useState<boolean>(false);
@@ -1558,13 +1563,27 @@ export const ZFoldLetterScene = forwardRef<
       {/* Top Monospace Header when folded */}
       <div
         style={{ opacity: chromeOpacity }}
-        className="pointer-events-none absolute top-6 right-6 left-6 flex items-center justify-between font-mono text-[10px] tracking-[0.22em] text-[#8C8C8A] transition-opacity duration-150 sm:top-8 sm:right-10 sm:left-10"
+        className="pointer-events-none absolute top-5 right-5 left-5 flex items-center justify-between font-mono text-[10px] tracking-[0.22em] text-[#8C8C8A] transition-opacity duration-150 sm:top-7 sm:right-10 sm:left-10"
       >
         <span>NO. 001 // Z-FOLD</span>
-        <span className="hidden sm:inline">
+        <span className="hidden md:inline">
           DRAG TO ORBIT · PULL DOWN TO UNFOLD
         </span>
-        <span>{dateStamp}</span>
+        <div className="flex items-center gap-3">
+          <span className="hidden sm:inline">{dateStamp}</span>
+          {onOpenLibrary && chromeOpacity > 0.05 && (
+            <button
+              type="button"
+              onClick={onOpenLibrary}
+              onPointerDown={(e) => e.stopPropagation()}
+              className="sketch-pill pointer-events-auto inline-flex h-7 items-center gap-1.5 border border-[#222222] bg-[#FDFCF9] px-3 font-sans text-[11px] font-normal tracking-[0.14em] text-[#222222] transition-colors hover:bg-[#222222] hover:text-[#FAF9F6] active:scale-[0.97]"
+              aria-label="開啟光之圖庫 Library"
+            >
+              <LibraryIcon size={13} />
+              <span>Library</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Bottom Pull-to-Open Indicator when folded */}
