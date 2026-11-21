@@ -24,6 +24,9 @@ import {
   sampleDrawingToGridAnd30Led,
 } from "@/lib/grid-sampling";
 import {
+  MAILBOX_NUMBERS,
+  MailboxNumber,
+  parseMailboxParam,
   UploadProgressPhase,
   uploadWebpBlobToLibrary,
 } from "@/lib/image-library-api";
@@ -31,7 +34,6 @@ import {
   BrushLabIcon,
   DownloadIcon,
   EraserIcon,
-  LibraryIcon,
   PaperPlaneIcon,
   PenTipIcon,
   RedoIcon,
@@ -54,6 +56,7 @@ import {
 } from "@/components/SparkleParticleOverlay";
 
 type ToolMode = "brush" | "eraser";
+type ActivePostMode = 0 | MailboxNumber;
 type PostSendStage =
   | "idle"
   | "sampling"
@@ -64,8 +67,8 @@ type PostSendStage =
 
 type UploadStatusState =
   | { state: "idle" }
-  | { state: "uploading"; phase: UploadProgressPhase }
-  | { state: "success"; url: string }
+  | { state: "uploading"; phase: UploadProgressPhase; mailbox: MailboxNumber }
+  | { state: "success"; url: string; mailbox: MailboxNumber }
   | { state: "error"; message: string; canRetry: boolean };
 
 const MAX_HISTORY = 5;
@@ -105,8 +108,9 @@ export function LightMessageLetterApp() {
     useState<GridSamplingResult | null>(null);
   const [isRefoldDragging, setIsRefoldDragging] = useState<boolean>(false);
 
-  // Cloud R2 upload status & Library page view state
-  const [isLibraryOpen, setIsLibraryOpen] = useState<boolean>(false);
+  // Cloud R2 upload status, Mailbox (1..6) selection, & URL `?post` mode (default 0 = send home)
+  const [selectedMailbox, setSelectedMailbox] = useState<MailboxNumber>(1);
+  const [activePost, setActivePost] = useState<ActivePostMode>(0);
   const [libraryRefreshSignal, setLibraryRefreshSignal] = useState<number>(0);
   const [uploadStatus, setUploadStatus] = useState<UploadStatusState>({
     state: "idle",
@@ -126,7 +130,10 @@ export function LightMessageLetterApp() {
   const stageTimerRef = useRef<number | null>(null);
   const uploadToastTimerRef = useRef<number | null>(null);
   const pendingWebpPromiseRef = useRef<Promise<Blob> | null>(null);
-  const lastUploadBlobRef = useRef<Blob | null>(null);
+  const lastUploadPayloadRef = useRef<{
+    blob: Blob;
+    mailbox: MailboxNumber;
+  } | null>(null);
   const paperBoxRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasSizeRef = useRef<{ width: number; height: number; dpr: number }>({
@@ -621,6 +628,48 @@ export function LightMessageLetterApp() {
     }, 480);
   }, [hasStrokes, isClearing, postSendStage, pushHistorySnapshot]);
 
+  // Return to the default send-letter home page (`post = 0`)
+  const returnToSendHome = useCallback(() => {
+    setActivePost(0);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("post");
+    const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+    window.history.replaceState(null, "", nextUrl);
+  }, []);
+
+  const handleWriteForMailbox = useCallback(
+    (mailbox: MailboxNumber) => {
+      setSelectedMailbox(mailbox);
+      returnToSendHome();
+    },
+    [returnToSendHome]
+  );
+
+  // Detect `?post=1..6` on initial load & browser history navigation.
+  // Default (missing, `?post=0`, or invalid) stays strictly at `post = 0` (send-letter home page).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const applyPostParamFromLocation = () => {
+      const params = new URLSearchParams(window.location.search);
+      const parsed = parseMailboxParam(params.get("post"));
+      if (parsed !== null) {
+        setSelectedMailbox(parsed);
+        setActivePost(parsed);
+      } else {
+        setActivePost(0);
+      }
+    };
+
+    const rafId = window.requestAnimationFrame(applyPostParamFromLocation);
+    window.addEventListener("popstate", applyPostParamFromLocation);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener("popstate", applyPostParamFromLocation);
+    };
+  }, []);
+
   // Cleanup any pending choreography / toast timers on unmount
   useEffect(() => {
     return () => {
@@ -636,52 +685,60 @@ export function LightMessageLetterApp() {
   }, []);
 
   // =========================================================================
-  // DIRECT-TO-R2 WEBP UPLOAD + SUPABASE DB PERSISTENCE
+  // DIRECT-TO-R2 WEBP UPLOAD + SUPABASE DB PERSISTENCE (WITH MAILBOX 1..6)
   // Binary WebP Blob uploads directly from browser -> Cloudflare R2 (never via Node)
   // =========================================================================
-  const runDirectR2Upload = useCallback(async (blob: Blob) => {
-    if (uploadToastTimerRef.current !== null) {
-      window.clearTimeout(uploadToastTimerRef.current);
-      uploadToastTimerRef.current = null;
-    }
+  const runDirectR2Upload = useCallback(
+    async (blob: Blob, mailbox: MailboxNumber) => {
+      if (uploadToastTimerRef.current !== null) {
+        window.clearTimeout(uploadToastTimerRef.current);
+        uploadToastTimerRef.current = null;
+      }
 
-    lastUploadBlobRef.current = blob;
-    setUploadStatus({ state: "uploading", phase: "requesting-url" });
-
-    try {
-      const safeStamp = dateStamp.replace(/\./g, "-");
-      const savedRow = await uploadWebpBlobToLibrary(
-        blob,
-        `light-message-${safeStamp}.webp`,
-        (phase) => {
-          setUploadStatus({ state: "uploading", phase });
-        }
-      );
-
-      lastUploadBlobRef.current = null;
-      setLibraryRefreshSignal((n) => n + 1);
-      setUploadStatus({ state: "success", url: savedRow.url });
-
-      uploadToastTimerRef.current = window.setTimeout(() => {
-        setUploadStatus((prev) =>
-          prev.state === "success" ? { state: "idle" } : prev
-        );
-      }, 5500);
-    } catch (err) {
-      console.error("[Light-msg Upload Error]", err);
+      lastUploadPayloadRef.current = { blob, mailbox };
       setUploadStatus({
-        state: "error",
-        message:
-          err instanceof Error ? err.message : "圖片上傳失敗，請檢查網路或重試",
-        canRetry: true,
+        state: "uploading",
+        phase: "requesting-url",
+        mailbox,
       });
-    }
-  }, [dateStamp]);
+
+      try {
+        const safeStamp = dateStamp.replace(/\./g, "-");
+        const savedRow = await uploadWebpBlobToLibrary(
+          blob,
+          mailbox,
+          `light-message-post${mailbox}-${safeStamp}.webp`,
+          (phase) => {
+            setUploadStatus({ state: "uploading", phase, mailbox });
+          }
+        );
+
+        lastUploadPayloadRef.current = null;
+        setLibraryRefreshSignal((n) => n + 1);
+        setUploadStatus({ state: "success", url: savedRow.url, mailbox });
+
+        uploadToastTimerRef.current = window.setTimeout(() => {
+          setUploadStatus((prev) =>
+            prev.state === "success" ? { state: "idle" } : prev
+          );
+        }, 5500);
+      } catch (err) {
+        console.error("[Light-msg Upload Error]", err);
+        setUploadStatus({
+          state: "error",
+          message:
+            err instanceof Error ? err.message : "圖片上傳失敗，請檢查網路或重試",
+          canRetry: true,
+        });
+      }
+    },
+    [dateStamp]
+  );
 
   const handleRetryUpload = useCallback(() => {
-    const blob = lastUploadBlobRef.current;
-    if (!blob) return;
-    void runDirectR2Upload(blob);
+    const payload = lastUploadPayloadRef.current;
+    if (!payload) return;
+    void runDirectR2Upload(payload.blob, payload.mailbox);
   }, [runDirectR2Upload]);
 
   // =========================================================================
@@ -811,11 +868,12 @@ export function LightMessageLetterApp() {
         : null;
 
     // 0. Kick off direct-to-R2 WebP upload & Supabase DB save in parallel with animation
+    const targetMailbox = selectedMailbox;
     const webpPromise = pendingWebpPromiseRef.current;
     pendingWebpPromiseRef.current = null;
     if (webpPromise) {
       webpPromise
-        .then((blob) => runDirectR2Upload(blob))
+        .then((blob) => runDirectR2Upload(blob, targetMailbox))
         .catch((err) => {
           console.error("Failed to generate WebP blob:", err);
           setUploadStatus({
@@ -870,7 +928,7 @@ export function LightMessageLetterApp() {
         }
       );
     }, 1020);
-  }, [paperTargetRect, resetToFreshLoop, runDirectR2Upload]);
+  }, [paperTargetRect, resetToFreshLoop, runDirectR2Upload, selectedMailbox]);
 
   // Stage 2 Action 1: Download full hand-drawn letter JPG -> immediately launch Stage 3
   const handleSaveAndProceedToEnvelope = useCallback(() => {
@@ -1001,7 +1059,6 @@ export function LightMessageLetterApp() {
         dateStamp={dateStamp}
         targetBoxRect={paperTargetRect}
         onModeChange={handleSceneModeChange}
-        onOpenLibrary={() => setIsLibraryOpen(true)}
       />
 
       {/* ================================================================= */}
@@ -1024,25 +1081,11 @@ export function LightMessageLetterApp() {
               A MESSAGE OF LIGHT
             </span>
           </div>
-          <div className="flex items-center gap-2.5">
-            <span className="hidden font-mono text-[10px] tracking-[0.18em] text-[#8C8C8A] sm:inline">
-              {tool === "eraser"
-                ? `ERASER · ${currentSize.eraserDiameter}px`
-                : `${currentBrushMeta.enLabel} · #${String(randomSeed).padStart(4, "0")}`}
-            </span>
-            <button
-              type="button"
-              onClick={() => {
-                setIsBrushLabOpen(false);
-                setIsLibraryOpen(true);
-              }}
-              aria-label="開啟光之圖庫 Library"
-              className="sketch-pill inline-flex h-7 items-center gap-1.5 border border-[#222222] bg-[#FDFCF9] px-3 text-[11px] font-normal tracking-[0.14em] text-[#222222] transition-colors hover:bg-[#222222] hover:text-[#FAF9F6] active:scale-[0.97]"
-            >
-              <LibraryIcon size={13} />
-              <span>Library</span>
-            </button>
-          </div>
+          <span className="font-mono text-[10px] tracking-[0.18em] text-[#8C8C8A]">
+            {tool === "eraser"
+              ? `ERASER · ${currentSize.eraserDiameter}px`
+              : `${currentBrushMeta.enLabel} · #${String(randomSeed).padStart(4, "0")}`}
+          </span>
         </header>
 
         {/* Center Paper Slot (exact pixel target for 3D flattened letter & Stage 1 scan) */}
@@ -1474,8 +1517,45 @@ export function LightMessageLetterApp() {
               是否要儲存這張信紙？
             </h2>
 
+            {/* Mailbox Selector (1 ~ 6) */}
+            <div className="mt-3.5 w-full border-y border-[#FAF9F6]/15 py-2.5">
+              <div className="mb-2 flex items-center justify-between px-0.5">
+                <span className="text-[11px] font-light tracking-[0.18em] text-[#D8D8D2]">
+                  選擇投遞郵筒
+                </span>
+                <span className="font-mono text-[10px] tracking-[0.18em] text-[#F3D98B]">
+                  POST #{selectedMailbox}
+                </span>
+              </div>
+              <div
+                role="group"
+                aria-label="選擇 1 到 6 號郵筒"
+                className="grid grid-cols-6 gap-1.5"
+              >
+                {MAILBOX_NUMBERS.map((num) => {
+                  const active = selectedMailbox === num;
+                  return (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setSelectedMailbox(num)}
+                      aria-pressed={active}
+                      aria-label={`郵筒 ${num}`}
+                      className={`sketch-pill-dark flex h-8 items-center justify-center border font-mono text-xs transition-all duration-200 active:scale-95 ${
+                        active
+                          ? "border-[#F3D98B] bg-[#F3D98B] font-medium text-[#141416]"
+                          : "border-[#FAF9F6]/30 bg-transparent text-[#FAF9F6]/80 hover:border-[#FAF9F6]/80 hover:text-[#FAF9F6]"
+                      }`}
+                    >
+                      {num}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Three Action Buttons: Save JPG / Send Directly / Return to Edit */}
-            <div className="mt-4 flex w-full flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="mt-3.5 flex w-full flex-col gap-2 sm:flex-row sm:items-center">
               <button
                 type="button"
                 onClick={handleSaveAndProceedToEnvelope}
@@ -1509,14 +1589,14 @@ export function LightMessageLetterApp() {
       {/* ================================================================= */}
       {/* DIRECT-TO-R2 UPLOAD STATUS TOAST (UPLOADING / SUCCESS / ERROR)    */}
       {/* ================================================================= */}
-      {uploadStatus.state !== "idle" && !isLibraryOpen && (
+      {uploadStatus.state !== "idle" && activePost === 0 && (
         <div
           role="status"
           aria-live="polite"
           className="pointer-events-none fixed inset-x-0 top-4 z-50 flex justify-center px-3 sm:top-5"
         >
           <div
-            className={`animate-muji-modal-in pointer-events-auto flex max-w-[92vw] items-center gap-2.5 border px-3.5 py-2 text-xs transition-colors duration-300 ${
+            className={`animate-muji-modal-in pointer-events-auto flex max-w-[94vw] flex-wrap items-center justify-center gap-2 border px-3.5 py-2 text-xs transition-colors duration-300 ${
               isDarkAtmosphere
                 ? "sketch-card-dark border-[#FAF9F6]/70 bg-[#121215]/95 text-[#FAF9F6]"
                 : "sketch-card border-[#222222] bg-[#FDFCF9]/95 text-[#222222]"
@@ -1527,10 +1607,10 @@ export function LightMessageLetterApp() {
                 <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-current border-t-transparent" />
                 <span className="tracking-[0.12em]">
                   {uploadStatus.phase === "requesting-url"
-                    ? "正在準備雲端上傳連結…"
+                    ? `正在準備郵筒 #${uploadStatus.mailbox} 上傳連結…`
                     : uploadStatus.phase === "uploading-r2"
-                      ? "正在直傳 WebP 信紙至雲端…"
-                      : "正在收錄至光之圖庫…"}
+                      ? `正在直傳 WebP 至郵筒 #${uploadStatus.mailbox}…`
+                      : `正在收錄至郵筒 #${uploadStatus.mailbox}…`}
                 </span>
               </>
             )}
@@ -1543,21 +1623,9 @@ export function LightMessageLetterApp() {
                     isDarkAtmosphere ? "bg-[#F3D98B]" : "bg-[#222222]"
                   }`}
                 />
-                <span className="tracking-[0.12em]">已收錄至光之圖庫</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUploadStatus({ state: "idle" });
-                    setIsLibraryOpen(true);
-                  }}
-                  className={`ml-1 rounded-full border px-2.5 py-0.5 text-[10.5px] tracking-[0.12em] transition-colors ${
-                    isDarkAtmosphere
-                      ? "border-[#F3D98B] text-[#F3D98B] hover:bg-[#F3D98B] hover:text-[#121215]"
-                      : "border-[#222222] text-[#222222] hover:bg-[#222222] hover:text-[#FAF9F6]"
-                  }`}
-                >
-                  查看 Library
-                </button>
+                <span className="tracking-[0.12em]">
+                  已成功投入郵筒 #{uploadStatus.mailbox}
+                </span>
               </>
             )}
 
@@ -1594,11 +1662,13 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* LIBRARY PAGE VIEW (RESPONSIVE GRID + LIGHTBOX + LOAD MORE)        */}
+      {/* SINGLE-MAILBOX GALLERY VIEW (ONLY WHEN `?post=1..6`, NEVER AT 0)  */}
       {/* ================================================================= */}
-      {isLibraryOpen && (
+      {activePost !== 0 && (
         <LetterLibraryView
-          onClose={() => setIsLibraryOpen(false)}
+          mailbox={activePost}
+          onWriteForMailbox={handleWriteForMailbox}
+          onClose={returnToSendHome}
           refreshSignal={libraryRefreshSignal}
         />
       )}

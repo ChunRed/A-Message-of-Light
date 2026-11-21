@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import path from "node:path";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getRequiredEnv } from "../env.js";
 
@@ -41,7 +45,9 @@ function buildObjectKey(fileName, contentType) {
 
   const datePrefix = new Date().toISOString().slice(0, 10);
   const uniqueId = crypto.randomUUID();
-  const suffix = safeBase ? `${uniqueId}-${safeBase}.${ext}` : `${uniqueId}.${ext}`;
+  const suffix = safeBase
+    ? `${uniqueId}-${safeBase}.${ext}`
+    : `${uniqueId}.${ext}`;
   return `uploads/${datePrefix}/${suffix}`;
 }
 
@@ -62,4 +68,33 @@ export async function createPresignedUploadUrl({ fileName, contentType }) {
 
   const publicUrl = `${publicBaseUrl}/${key}`;
   return { uploadUrl, key, publicUrl };
+}
+
+/**
+ * Extracts an R2 object key from a public URL when a database record lacks `key`.
+ */
+export function extractR2KeyFromUrl(url) {
+  if (!url || typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url.trim());
+    return decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Deletes an object from the configured Cloudflare R2 bucket via DeleteObjectCommand.
+ */
+export async function deleteR2Object(key) {
+  const cleanKey = typeof key === "string" ? key.trim().replace(/^\/+/, "") : "";
+  if (!cleanKey) {
+    throw new Error("Empty R2 object key");
+  }
+  const bucket = getRequiredEnv("R2_BUCKET_NAME");
+  const command = new DeleteObjectCommand({
+    Bucket: bucket,
+    Key: cleanKey,
+  });
+  await getR2Client().send(command);
 }

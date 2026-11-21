@@ -4,10 +4,14 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   fetchLibraryImages,
   LibraryImageItem,
+  MailboxNumber,
 } from "@/lib/image-library-api";
 import { DownloadIcon } from "@/components/LetterIcons";
 
 interface LetterLibraryViewProps {
+  /** Strictly locked to a single mailbox (1..6) from `?post=1..6` */
+  mailbox: MailboxNumber;
+  onWriteForMailbox?: (mailbox: MailboxNumber) => void;
   onClose: () => void;
   /** Increment to force-refresh when a new image was just uploaded */
   refreshSignal?: number;
@@ -26,6 +30,8 @@ function formatItemDate(iso?: string): string {
 }
 
 export function LetterLibraryView({
+  mailbox,
+  onWriteForMailbox,
   onClose,
   refreshSignal = 0,
 }: LetterLibraryViewProps) {
@@ -38,7 +44,12 @@ export function LetterLibraryView({
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
 
   const loadPage = useCallback(
-    async (targetPage: number, append: boolean, signal?: AbortSignal) => {
+    async (
+      targetPage: number,
+      append: boolean,
+      targetMailbox: MailboxNumber,
+      signal?: AbortSignal
+    ) => {
       if (append) {
         setIsLoadingMore(true);
       } else {
@@ -47,7 +58,12 @@ export function LetterLibraryView({
       setErrorMsg(null);
 
       try {
-        const res = await fetchLibraryImages(targetPage, PAGE_LIMIT, signal);
+        const res = await fetchLibraryImages(
+          targetPage,
+          PAGE_LIMIT,
+          targetMailbox,
+          signal
+        );
         if (signal?.aborted) return;
 
         setItems((prev) => {
@@ -69,7 +85,7 @@ export function LetterLibraryView({
       } catch (err) {
         if (signal?.aborted) return;
         setErrorMsg(
-          err instanceof Error ? err.message : "無法載入圖庫資料，請稍後再試"
+          err instanceof Error ? err.message : "無法載入郵筒信件，請稍後再試"
         );
       } finally {
         if (!signal?.aborted) {
@@ -81,13 +97,18 @@ export function LetterLibraryView({
     []
   );
 
-  // Initial load & refresh on signal
+  // Load ONLY the locked mailbox's images whenever `mailbox` or `refreshSignal` changes
   useEffect(() => {
     const controller = new AbortController();
 
     async function fetchFirstPage() {
       try {
-        const res = await fetchLibraryImages(1, PAGE_LIMIT, controller.signal);
+        const res = await fetchLibraryImages(
+          1,
+          PAGE_LIMIT,
+          mailbox,
+          controller.signal
+        );
         if (controller.signal.aborted) return;
         setItems(res.items);
         setPage(1);
@@ -96,7 +117,7 @@ export function LetterLibraryView({
       } catch (err) {
         if (controller.signal.aborted) return;
         setErrorMsg(
-          err instanceof Error ? err.message : "無法載入圖庫資料，請稍後再試"
+          err instanceof Error ? err.message : "無法載入郵筒信件，請稍後再試"
         );
       } finally {
         if (!controller.signal.aborted) {
@@ -107,7 +128,7 @@ export function LetterLibraryView({
 
     void fetchFirstPage();
     return () => controller.abort();
-  }, [refreshSignal]);
+  }, [mailbox, refreshSignal]);
 
   // Keyboard navigation for Lightbox & ESC to close
   useEffect(() => {
@@ -136,12 +157,12 @@ export function LetterLibraryView({
 
   const handleLoadMore = () => {
     if (isLoadingMore || !hasMore) return;
-    loadPage(page + 1, true);
+    void loadPage(page + 1, true, mailbox);
   };
 
   const handleRefresh = () => {
     setSelectedIndex(null);
-    loadPage(1, false);
+    void loadPage(1, false, mailbox);
   };
 
   const selectedItem =
@@ -150,7 +171,7 @@ export function LetterLibraryView({
   return (
     <div
       role="region"
-      aria-label="光之圖庫 Library"
+      aria-label={`郵筒 ${mailbox} 信件瀏覽`}
       className="fixed inset-0 z-50 flex h-[100dvh] w-full flex-col overflow-hidden bg-[#FCFBFA] text-[#222222]"
     >
       {/* Subtle cotton paper grain overlay */}
@@ -159,7 +180,7 @@ export function LetterLibraryView({
         className="paper-grain-overlay pointer-events-none fixed inset-0 z-0 opacity-[0.045]"
       />
 
-      {/* Sticky Minimalist Hand-Drawn Header */}
+      {/* Sticky Minimalist Hand-Drawn Header (Locked to Single Mailbox, NO QR / NO Switcher) */}
       <header className="relative z-10 shrink-0 border-b border-dashed border-[#222222]/20 bg-[#FDFCF9]/92 px-3 py-3 backdrop-blur-[3px] sm:px-6 sm:py-4">
         <div className="mx-auto flex w-full max-w-[1160px] items-center justify-between gap-2">
           <button
@@ -182,15 +203,15 @@ export function LetterLibraryView({
                 strokeLinejoin="round"
               />
             </svg>
-            <span>返回信紙</span>
+            <span>返回寄信主頁</span>
           </button>
 
           <div className="flex flex-col items-center text-center">
             <h1 className="text-sm font-normal tracking-[0.24em] text-[#222222] sm:text-base">
-              光之圖庫
+              郵筒 {mailbox} · 光之信箱
             </h1>
             <span className="font-mono text-[9px] tracking-[0.22em] text-[#8C8C8A]">
-              LIGHT LIBRARY · ARCHIVE
+              MAILBOX POST #{mailbox}
             </span>
           </div>
 
@@ -258,30 +279,41 @@ export function LetterLibraryView({
             </div>
           )}
 
-          {/* Empty State */}
+          {/* Empty State (Strictly Isolated to Current Mailbox) */}
           {!isInitialLoading && !errorMsg && items.length === 0 && (
-            <div className="sketch-card mx-auto my-12 flex max-w-[340px] flex-col items-center border border-[#222222] bg-[#FDFCF9] px-6 py-8 text-center">
+            <div className="sketch-card mx-auto my-12 flex max-w-[360px] flex-col items-center border border-[#222222] bg-[#FDFCF9] px-6 py-8 text-center">
               <p className="text-sm font-normal tracking-[0.2em] text-[#222222]">
-                尚未收錄光的訊息
+                郵筒 {mailbox} 尚無收錄信紙
               </p>
               <p className="mt-2 text-xs font-light leading-relaxed tracking-[0.1em] text-[#8C8C8A]">
-                回到信紙寫下第一則手繪訊息並寄出，它將出現在這片圖庫裡
+                這個郵筒目前還沒有收到信件，你可以回到寄信主頁寫一封信投入郵筒{" "}
+                {mailbox}。
               </p>
-              <button
-                type="button"
-                onClick={onClose}
-                className="sketch-pill mt-5 border border-[#222222] bg-[#222222] px-5 py-1.5 text-xs tracking-[0.18em] text-[#FAF9F6] transition-colors hover:bg-white hover:text-[#222222]"
-              >
-                回到信紙創作
-              </button>
+              <div className="mt-5 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (onWriteForMailbox) {
+                      onWriteForMailbox(mailbox);
+                    } else {
+                      onClose();
+                    }
+                  }}
+                  className="sketch-pill border border-[#222222] bg-[#222222] px-4 py-1.5 text-xs tracking-[0.16em] text-[#FAF9F6] transition-colors hover:bg-white hover:text-[#222222]"
+                >
+                  寫信投入郵筒 {mailbox}
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Responsive Image Grid: Minimum 2 columns on mobile! */}
+          {/* Responsive Image Grid: Minimum 2 columns on mobile */}
           {items.length > 0 && (
             <>
               <div className="mb-3.5 flex items-center justify-between font-mono text-[10px] tracking-[0.16em] text-[#8C8C8A]">
-                <span>SHOWING {items.length} LETTERS</span>
+                <span>
+                  POST #{mailbox} · {items.length} LETTERS
+                </span>
                 <span>PAGE {String(page).padStart(2, "0")}</span>
               </div>
 
@@ -299,7 +331,7 @@ export function LetterLibraryView({
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={item.url}
-                          alt={`一則光的訊息 #${idx + 1}`}
+                          alt={`郵筒 ${mailbox} 光的訊息 #${idx + 1}`}
                           loading="lazy"
                           decoding="async"
                           className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-[1.03]"
@@ -334,7 +366,7 @@ export function LetterLibraryView({
                   </button>
                 ) : (
                   <span className="font-mono text-[10px] tracking-[0.2em] text-[#8C8C8A]">
-                    — END OF ARCHIVE · 共 {items.length} 則光的訊息 —
+                    — POST #{mailbox} · 共 {items.length} 則光的訊息 —
                   </span>
                 )}
               </div>
@@ -362,7 +394,7 @@ export function LetterLibraryView({
             <div className="mb-3 flex w-full items-center justify-between text-[#FAF9F6]">
               <div className="font-mono text-[10px] tracking-[0.18em] text-[#D4D4CE]">
                 NO.{String(selectedIndex + 1).padStart(3, "0")} /{" "}
-                {String(items.length).padStart(3, "0")}
+                {String(items.length).padStart(3, "0")} · POST #{mailbox}
                 {selectedItem.created_at
                   ? ` · ${formatItemDate(selectedItem.created_at)}`
                   : ""}
@@ -373,7 +405,7 @@ export function LetterLibraryView({
                   href={selectedItem.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  download={`light-message-${selectedIndex + 1}.webp`}
+                  download={`light-message-post${mailbox}-${selectedIndex + 1}.webp`}
                   className="sketch-pill-dark inline-flex h-8 items-center gap-1.5 border border-[#FAF9F6]/60 bg-transparent px-3 text-[11px] tracking-[0.12em] text-[#FAF9F6] transition-colors hover:border-[#FAF9F6] hover:bg-[#FAF9F6]/12"
                 >
                   <DownloadIcon size={13} />
