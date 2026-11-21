@@ -13,6 +13,7 @@ import {
   drawCentered30UnitStrip,
   SETTLED_STRIP_Y_RATIO,
 } from "@/lib/grid-sampling";
+import { getFormattedDateStamp } from "@/lib/crayon-brush";
 import {
   buildJittered3DLineSegments,
   createSeededRng,
@@ -54,12 +55,20 @@ export interface ZFoldSceneHandle {
   /**
    * Runs Stage 3 & Stage 4 choreography:
    * 0.6s Z-fold half-fold (65 deg) -> 1.8s left/right pendulum showcase (+35/-35 deg, -8 deg pitch)
-   * -> press flat & slide into 1px wireframe envelope -> seal -> 0.2s pause -> 0.7s pure vertical upward flight (X = 0)
+   * -> press flat & slide into 1px wireframe envelope -> seal -> WAIT FOR USER SWIPE UP
+   * -> pure vertical upward flight (X = 0)
    */
   startEnvelopeAndSend: (
     onComplete: () => void,
-    onEmitSparkles?: (event: SceneSparkleBurstEvent) => void
+    onEmitSparkles?: (event: SceneSparkleBurstEvent) => void,
+    callbacks?: {
+      onReadyToSwipe?: () => void;
+      onSwipeLaunched?: () => void;
+      onSwipeProgress?: (progress: number) => void;
+    }
   ) => void;
+  /** Synchronizes 3D flat letter scale & Y offset with 2D sampling layout (0px drift) */
+  setPaperDisplayTransform: (scale: number, offsetY: number) => void;
   /** Resets the 3D scene & texture back to a fresh blank floating Z-fold letter */
   resetToFreshFolded: () => void;
   /** Starts an interactive pull-up-to-refold gesture from the flat state */
@@ -91,7 +100,9 @@ const SHOWCASE_PITCH_X = THREE.MathUtils.degToRad(8); // -8° downward camera pi
 const TEX_W = 1200;
 const TEX_H = 1740;
 
-const SEND_TOTAL_SEC = 4.78;
+const SEAL_COMPLETE_SEC = 3.88;
+const SWIPE_LAUNCH_THRESHOLD_PX = 88;
+const LAUNCH_DURATION_MS = 680;
 
 function easeInOutCubic(t: number): number {
   return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
@@ -350,6 +361,8 @@ export const ZFoldLetterScene = forwardRef<
   const mountRef = useRef<HTMLDivElement | null>(null);
   const [uiProgress, setUiProgress] = useState<number>(0);
   const [isDraggingPull, setIsDraggingPull] = useState<boolean>(false);
+  const [isAwaitingSwipe, setIsAwaitingSwipe] = useState<boolean>(false);
+  const [isSwipeDragging, setIsSwipeDragging] = useState<boolean>(false);
   const [sceneMode, setSceneMode] = useState<LetterSceneMode>("folded");
 
   const targetRectRef = useRef<TargetPaperRect | null>(targetBoxRect);
@@ -390,13 +403,30 @@ export const ZFoldLetterScene = forwardRef<
     startProgress: 0,
     isAutoAnimating: false,
     lastEmittedMode: "folded" as LetterSceneMode,
-    // Stage 3 & 4 Envelope + Sending Flight state
+    // Stage 3 & 4 Envelope + Interactive Swipe-Up Send state
     isSendingSequence: false,
+    sendSubPhase: "folding" as "folding" | "awaiting-swipe" | "launching",
     sendStartMs: 0,
     sendCompleteFired: false,
     onSendComplete: null as (() => void) | null,
     onEmitSparkles: null as ((event: SceneSparkleBurstEvent) => void) | null,
+    onReadyToSwipe: null as (() => void) | null,
+    onSwipeLaunched: null as (() => void) | null,
+    onSwipeProgress: null as ((progress: number) => void) | null,
     lastSparkleEmitMs: 0,
+    // Interactive swipe-up physics
+    swipePointerActive: false,
+    swipeStartY: 0,
+    swipeLastY: 0,
+    swipeLastMs: 0,
+    swipeDragPx: 0,
+    swipeVelocityY: 0,
+    swipeVisualOffset: 0,
+    launchStartMs: 0,
+    launchStartWorldY: -0.26,
+    // Synchronized sampling shrink/lift transform for flat paper
+    paperDisplayScale: 1,
+    paperDisplayOffsetY: 0,
     // Gentle entrance fade-in when resetting to a brand-new blank loop
     introFadeStartMs: 0,
   });
@@ -493,26 +523,56 @@ export const ZFoldLetterScene = forwardRef<
       syncSampledStripTo3D,
       startEnvelopeAndSend: (
         onComplete: () => void,
-        onEmitSparkles?: (event: SceneSparkleBurstEvent) => void
+        onEmitSparkles?: (event: SceneSparkleBurstEvent) => void,
+        callbacks?: {
+          onReadyToSwipe?: () => void;
+          onSwipeLaunched?: () => void;
+          onSwipeProgress?: (progress: number) => void;
+        }
       ) => {
         const st = stateRef.current;
         st.isSendingSequence = true;
+        st.sendSubPhase = "folding";
         st.sendStartMs = performance.now();
         st.lastSparkleEmitMs = 0;
         st.sendCompleteFired = false;
         st.onSendComplete = onComplete;
         st.onEmitSparkles = onEmitSparkles ?? null;
+        st.onReadyToSwipe = callbacks?.onReadyToSwipe ?? null;
+        st.onSwipeLaunched = callbacks?.onSwipeLaunched ?? null;
+        st.onSwipeProgress = callbacks?.onSwipeProgress ?? null;
+        st.swipePointerActive = false;
+        st.swipeDragPx = 0;
+        st.swipeVelocityY = 0;
+        st.swipeVisualOffset = 0;
         st.isPointerDown = false;
         st.isExternalRefoldDrag = false;
         st.isAutoAnimating = false;
+        setIsAwaitingSwipe(false);
+        setIsSwipeDragging(false);
         emitModeIfChanged("sending");
+      },
+      setPaperDisplayTransform: (scale: number, offsetY: number) => {
+        const st = stateRef.current;
+        st.paperDisplayScale = scale;
+        st.paperDisplayOffsetY = offsetY;
       },
       resetToFreshFolded: () => {
         const st = stateRef.current;
         st.isSendingSequence = false;
+        st.sendSubPhase = "folding";
         st.sendCompleteFired = false;
         st.onSendComplete = null;
         st.onEmitSparkles = null;
+        st.onReadyToSwipe = null;
+        st.onSwipeLaunched = null;
+        st.onSwipeProgress = null;
+        st.swipePointerActive = false;
+        st.swipeDragPx = 0;
+        st.swipeVelocityY = 0;
+        st.swipeVisualOffset = 0;
+        st.paperDisplayScale = 1;
+        st.paperDisplayOffsetY = 0;
         st.lastSparkleEmitMs = 0;
         st.isPointerDown = false;
         st.isExternalRefoldDrag = false;
@@ -524,6 +584,8 @@ export const ZFoldLetterScene = forwardRef<
         st.currentRotY = -0.34;
         st.currentRotX = 0.08;
         st.introFadeStartMs = performance.now();
+        setIsAwaitingSwipe(false);
+        setIsSwipeDragging(false);
         setUiProgress(0);
         syncDrawingCanvas(null);
         emitModeIfChanged("folded");
@@ -600,7 +662,8 @@ export const ZFoldLetterScene = forwardRef<
     container.innerHTML = "";
     container.appendChild(renderer.domElement);
 
-    const baseCanvas = createUnifiedStationeryCanvas(dateStamp);
+    const resolvedDateStamp = getFormattedDateStamp();
+    const baseCanvas = createUnifiedStationeryCanvas(resolvedDateStamp);
     const compositeCanvas = document.createElement("canvas");
     compositeCanvas.width = TEX_W;
     compositeCanvas.height = TEX_H;
@@ -767,7 +830,7 @@ export const ZFoldLetterScene = forwardRef<
     const envH = 1.88;
     const flapH = 1.12;
 
-    const envFrontTex = createEnvelopeFrontTexture(dateStamp);
+    const envFrontTex = createEnvelopeFrontTexture(resolvedDateStamp);
     const envPlaneGeom = new THREE.PlaneGeometry(envW, envH);
     const ehw = envW / 2;
     const ehh = envH / 2;
@@ -971,7 +1034,7 @@ export const ZFoldLetterScene = forwardRef<
       const tanHalfFov = Math.tan(fovRad / 2);
       const aspect = Math.max(0.35, vpW / Math.max(1, vpH));
 
-      // Compute exact target 2D letter projection parameters
+      // Compute exact target 2D letter projection parameters (incorporating synchronized sampling shrink/lift!)
       const box = targetRectRef.current;
       let zFlatTarget = 12;
       let flatCenterX = 0;
@@ -979,19 +1042,23 @@ export const ZFoldLetterScene = forwardRef<
       let flatScaleX = 1;
 
       if (box && box.width > 10 && box.height > 10 && vpW > 10 && vpH > 10) {
-        zFlatTarget = (totalUnfoldedH * vpH) / (2 * box.height * tanHalfFov);
+        const effScale = Math.max(0.35, st.paperDisplayScale);
+        const effW = box.width * effScale;
+        const effH = box.height * effScale;
+
+        zFlatTarget = (totalUnfoldedH * vpH) / (2 * effH * tanHalfFov);
         const visHAtTarget = 2 * zFlatTarget * tanHalfFov;
         const visWAtTarget = visHAtTarget * aspect;
 
         const boxCenterX = box.left + box.width / 2;
-        const boxCenterY = box.top + box.height / 2;
+        const boxCenterY = box.top + box.height / 2 + st.paperDisplayOffsetY;
         const ndcX = (boxCenterX / vpW) * 2 - 1;
         const ndcY = 1 - (boxCenterY / vpH) * 2;
 
         flatCenterX = ndcX * (visWAtTarget / 2);
         flatCenterY = ndcY * (visHAtTarget / 2);
 
-        const targetWorldW = (box.width / vpW) * visWAtTarget;
+        const targetWorldW = (effW / vpW) * visWAtTarget;
         flatScaleX = targetWorldW / panelW;
       }
 
@@ -1067,11 +1134,52 @@ export const ZFoldLetterScene = forwardRef<
         const insertP = easeInOutCubic(clamp01((sElapsed - 2.58) / 0.66));
         const sealP = easeInOutCubic(clamp01((sElapsed - 3.2) / 0.65));
 
-        // ---------------------------------------------------------------------
-        // STAGE 4 (3.85s -> 4.05s pause 0.2s -> 4.05s -> 4.75s pure vertical flight 0.7s)
-        // ---------------------------------------------------------------------
-        const flyP = easeInCubic(clamp01((sElapsed - 4.05) / 0.7));
-        const arcDrawP = easeOutCubic(clamp01((sElapsed - 3.78) / 0.52));
+        // Transition into interactive SWIPE-UP WAIT state right once flap seals!
+        if (st.sendSubPhase === "folding" && sElapsed >= SEAL_COMPLETE_SEC) {
+          st.sendSubPhase = "awaiting-swipe";
+          st.swipeDragPx = 0;
+          st.swipeVisualOffset = 0;
+          st.swipeVelocityY = 0;
+          setIsAwaitingSwipe(true);
+          st.onReadyToSwipe?.();
+        }
+
+        // Compute flight / interactive drag progress based on sub-phase
+        let flyP = 0;
+        let currentEnvY = envBaseY;
+        let currentEnvScale = 0.9 + 0.1 * envInP;
+        let currentEnvRotX = 0;
+        let envFadeOut = 1;
+        let arcDrawP = easeOutCubic(clamp01((sElapsed - 3.45) / 0.65));
+
+        if (st.sendSubPhase === "awaiting-swipe") {
+          const dragNorm = clamp01(st.swipeDragPx / Math.max(210, vpH * 0.36));
+          const targetWorldPull =
+            Math.pow(dragNorm, 0.88) * (visHAtEnv * 0.32);
+          const idleFloat =
+            st.swipePointerActive || st.swipeDragPx > 2
+              ? 0
+              : Math.sin(now * 0.0031) * 0.048;
+
+          const lerpFactor = st.swipePointerActive ? 0.32 : 0.14;
+          st.swipeVisualOffset +=
+            (targetWorldPull - st.swipeVisualOffset) * lerpFactor;
+
+          currentEnvY = envBaseY + st.swipeVisualOffset + idleFloat;
+          currentEnvScale = 1 + Math.min(0.055, dragNorm * 0.055);
+          currentEnvRotX = -Math.min(0.16, dragNorm * 0.16);
+          arcDrawP = 0.68 + 0.32 * dragNorm;
+        } else if (st.sendSubPhase === "launching") {
+          flyP = easeInCubic(
+            clamp01((now - st.launchStartMs) / LAUNCH_DURATION_MS)
+          );
+          currentEnvY =
+            st.launchStartWorldY + (exitY - st.launchStartWorldY) * flyP;
+          currentEnvScale = 1.04 - 0.28 * flyP;
+          currentEnvRotX = -0.1 * (1 - flyP);
+          envFadeOut = 1 - clamp01((flyP - 0.36) / 0.64);
+          arcDrawP = 1;
+        }
 
         // Smooth camera pullback during Action A from flat writing zoom to 3D showcase framing
         camera.position.z = zFlatTarget + (zEnvStage - zFlatTarget) * actionAP;
@@ -1100,7 +1208,6 @@ export const ZFoldLetterScene = forwardRef<
 
         // Envelope visibility & fade-out during vertical exit
         envGroup.visible = envInP > 0.005;
-        const envFadeOut = 1 - clamp01((flyP - 0.36) / 0.64);
         const envAlpha = envInP * envFadeOut;
 
         // Hide letter cleanly behind front pocket wall once inserted & flap closes
@@ -1111,19 +1218,9 @@ export const ZFoldLetterScene = forwardRef<
         creaseLineMat.opacity = (0.08 + 0.92 * actionAP) * letterAlpha;
         letterRoot.visible = letterAlpha > 0.01;
 
-        if (flyP > 0) {
-          // Stage 4: Strictly straight vertical upward ascent (X displacement strictly 0!)
-          const flyY = envBaseY + (exitY - envBaseY) * flyP;
-          const flyScale = 1 - 0.24 * flyP;
-          envGroup.position.set(0, flyY, 0);
-          envGroup.scale.set(flyScale, flyScale, flyScale);
-          envGroup.rotation.set(0, 0, 0);
-        } else {
-          const eScale = 0.9 + 0.1 * envInP;
-          envGroup.position.set(0, envBaseY, 0);
-          envGroup.scale.set(eScale, eScale, eScale);
-          envGroup.rotation.set(0, 0, 0);
-        }
+        envGroup.position.set(0, currentEnvY, 0);
+        envGroup.scale.set(currentEnvScale, currentEnvScale, currentEnvScale);
+        envGroup.rotation.set(currentEnvRotX, 0, 0);
 
         // Apply letter 3D showcase & insertion transform
         letterRoot.position.set(lX, lY, 0);
@@ -1155,7 +1252,8 @@ export const ZFoldLetterScene = forwardRef<
             )
           );
           arcGeom.setDrawRange(0, drawVerts);
-          arcMat.opacity = 0.44 * envFadeOut;
+          arcMat.opacity =
+            (st.sendSubPhase === "awaiting-swipe" ? 0.34 : 0.48) * envFadeOut;
         }
 
         // ---------------------------------------------------------------------
@@ -1166,12 +1264,20 @@ export const ZFoldLetterScene = forwardRef<
           camera.updateMatrixWorld();
 
           const emitIntervalMs =
-            sElapsed < 2.4 ? 190 : sElapsed < 3.84 ? 165 : 115;
+            st.sendSubPhase === "launching"
+              ? 105
+              : st.sendSubPhase === "awaiting-swipe"
+                ? st.swipePointerActive
+                  ? 135
+                  : 320
+                : sElapsed < 2.4
+                  ? 190
+                  : 165;
 
           if (now - st.lastSparkleEmitMs >= emitIntervalMs) {
             st.lastSparkleEmitMs = now;
 
-            if (sElapsed >= 0.05 && sElapsed < 2.4) {
+            if (st.sendSubPhase === "folding" && sElapsed >= 0.05 && sElapsed < 2.4) {
               // Emit well-spaced hand-drawn sparkles from Z-fold creases while folding & swinging
               topHinge.getWorldPosition(projTmpA);
               const topScreen = projectWorldToViewport(projTmpA);
@@ -1203,7 +1309,7 @@ export const ZFoldLetterScene = forwardRef<
                 speedMax: 84,
                 sizeScale: 0.96,
               });
-            } else if (sElapsed >= 2.4 && sElapsed < 3.84) {
+            } else if (st.sendSubPhase === "folding" && sElapsed >= 2.4 && sElapsed < 3.84) {
               // Emit well-spaced hand-drawn sparkles billowing from the open envelope mouth until sealed
               const mouthOpenFactor = 1 - clamp01((sealP - 0.35) / 0.65);
               if (mouthOpenFactor > 0.08) {
@@ -1223,11 +1329,25 @@ export const ZFoldLetterScene = forwardRef<
                   sizeScale: 1.05,
                 });
               }
-            } else if (sElapsed >= 4.05 && sElapsed < 4.72 && envFadeOut > 0.08) {
+            } else if (st.sendSubPhase === "awaiting-swipe") {
+              // Gentle floating starlight around the waiting sealed envelope (stronger as user pulls upward)
+              projTmpA.set(0, currentEnvY - envH * 0.25, 0.05);
+              const envScreen = projectWorldToViewport(projTmpA);
+              st.onEmitSparkles({
+                x: envScreen.x,
+                y: envScreen.y,
+                spreadX: st.swipePointerActive ? 78 : 110,
+                spreadY: 24,
+                count: 1,
+                vxBias: 0,
+                vyBias: st.swipePointerActive ? 22 : -26,
+                speedMin: 18,
+                speedMax: 52,
+                sizeScale: 0.88,
+              });
+            } else if (st.sendSubPhase === "launching" && flyP < 0.95 && envFadeOut > 0.08) {
               // Crisp trailing hand-drawn stars behind the vertically ascending sealed envelope
-              const flyY = envBaseY + (exitY - envBaseY) * flyP;
-              const flyScale = 1 - 0.24 * flyP;
-              projTmpA.set(0, flyY - envH * 0.45 * flyScale, 0);
+              projTmpA.set(0, currentEnvY - envH * 0.45 * currentEnvScale, 0);
               const tailScreen = projectWorldToViewport(projTmpA);
               st.onEmitSparkles({
                 x: tailScreen.x,
@@ -1239,7 +1359,7 @@ export const ZFoldLetterScene = forwardRef<
                 vyBias: 24,
                 speedMin: 16,
                 speedMax: 52,
-                sizeScale: 0.92,
+                sizeScale: 0.94,
               });
             }
           }
@@ -1247,7 +1367,7 @@ export const ZFoldLetterScene = forwardRef<
 
         renderer.render(scene, camera);
 
-        if (sElapsed >= SEND_TOTAL_SEC && !st.sendCompleteFired) {
+        if (st.sendSubPhase === "launching" && flyP >= 1 && !st.sendCompleteFired) {
           st.sendCompleteFired = true;
           envGroup.visible = false;
           flightArcLine.visible = false;
@@ -1385,13 +1505,30 @@ export const ZFoldLetterScene = forwardRef<
         texture: null,
       };
     };
-  }, [dateStamp, emitModeIfChanged]);
+  }, [emitModeIfChanged]);
 
-  // Pointer interactions when folded: Orbit/Tilt OR Pull-down to Unfold
+  // Pointer interactions:
+  // 1) When folded: Orbit/Tilt OR Pull-down to Unfold
+  // 2) When sealed & awaiting swipe: Swipe / Drag UPWARD to launch envelope straight up!
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>, forcePull = false) => {
       const st = stateRef.current;
-      if (st.lastEmittedMode === "flat" || st.isSendingSequence) return;
+
+      // Branch 1: Interactive Swipe-Up to Send sealed envelope
+      if (st.isSendingSequence) {
+        if (st.sendSubPhase !== "awaiting-swipe") return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        st.swipePointerActive = true;
+        st.swipeStartY = e.clientY;
+        st.swipeLastY = e.clientY;
+        st.swipeLastMs = performance.now();
+        st.swipeDragPx = 0;
+        st.swipeVelocityY = 0;
+        setIsSwipeDragging(true);
+        return;
+      }
+
+      if (st.lastEmittedMode === "flat") return;
 
       e.currentTarget.setPointerCapture(e.pointerId);
       st.isExternalRefoldDrag = false;
@@ -1413,7 +1550,24 @@ export const ZFoldLetterScene = forwardRef<
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const st = stateRef.current;
-      if (!st.isPointerDown || st.isSendingSequence) return;
+
+      // Branch 1: Interactive Swipe-Up to Send sealed envelope
+      if (st.isSendingSequence) {
+        if (!st.swipePointerActive || st.sendSubPhase !== "awaiting-swipe") return;
+        const nowMs = performance.now();
+        const dtMs = Math.max(1, nowMs - st.swipeLastMs);
+        const stepUp = st.swipeLastY - e.clientY; // positive when moving UP
+        st.swipeVelocityY = st.swipeVelocityY * 0.45 + (stepUp / dtMs) * 0.55;
+        st.swipeLastY = e.clientY;
+        st.swipeLastMs = nowMs;
+
+        const dragUpPx = Math.max(0, st.swipeStartY - e.clientY);
+        st.swipeDragPx = dragUpPx;
+        st.onSwipeProgress?.(clamp01(dragUpPx / SWIPE_LAUNCH_THRESHOLD_PX));
+        return;
+      }
+
+      if (!st.isPointerDown) return;
 
       const totalDx = e.clientX - st.pointerStartX;
       const totalDy = e.clientY - st.pointerStartY;
@@ -1459,6 +1613,50 @@ export const ZFoldLetterScene = forwardRef<
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const st = stateRef.current;
+
+      // Branch 1: Release from Swipe-Up gesture -> Launch or Rebound
+      if (st.isSendingSequence && st.swipePointerActive) {
+        st.swipePointerActive = false;
+        setIsSwipeDragging(false);
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        } catch {
+          // ignore
+        }
+
+        const shouldLaunch =
+          st.swipeDragPx >= SWIPE_LAUNCH_THRESHOLD_PX ||
+          (st.swipeDragPx >= 32 && st.swipeVelocityY >= 0.42);
+
+        if (shouldLaunch && st.sendSubPhase === "awaiting-swipe") {
+          st.sendSubPhase = "launching";
+          st.launchStartMs = performance.now();
+          st.launchStartWorldY = -0.38 + st.swipeVisualOffset;
+          setIsAwaitingSwipe(false);
+          st.onSwipeProgress?.(1);
+          st.onSwipeLaunched?.();
+
+          // Celebratory hand-drawn crayon star burst on launch
+          st.onEmitSparkles?.({
+            x: window.innerWidth * 0.5,
+            y: window.innerHeight * 0.54,
+            spreadX: 92,
+            spreadY: 28,
+            count: 7,
+            vxBias: 0,
+            vyBias: -85,
+            speedMin: 48,
+            speedMax: 140,
+            sizeScale: 1.08,
+          });
+        } else {
+          st.swipeDragPx = 0;
+          st.swipeVelocityY = 0;
+          st.onSwipeProgress?.(0);
+        }
+        return;
+      }
+
       if (!st.isPointerDown) return;
 
       st.isPointerDown = false;
@@ -1511,13 +1709,16 @@ export const ZFoldLetterScene = forwardRef<
 
   const isFoldedUI = sceneMode === "folded" || sceneMode === "transitioning";
   const chromeOpacity = isFoldedUI ? Math.max(0, 1 - uiProgress / 42) : 0;
+  const canInteractMount = isFoldedUI || (sceneMode === "sending" && isAwaitingSwipe);
 
   return (
     <div
       onWheel={handleWheel}
       className={`fixed inset-0 ${
         sceneMode === "sending"
-          ? "z-30 pointer-events-none"
+          ? isAwaitingSwipe
+            ? "z-30 pointer-events-auto"
+            : "z-30 pointer-events-none"
           : isFoldedUI
             ? "z-20 pointer-events-auto"
             : "z-10 pointer-events-none"
@@ -1532,13 +1733,17 @@ export const ZFoldLetterScene = forwardRef<
         onPointerCancel={handlePointerUp}
         style={{ touchAction: "none" }}
         className={`absolute inset-0 h-full w-full select-none ${
-          isFoldedUI
-            ? isDraggingPull
+          canInteractMount
+            ? isDraggingPull || isSwipeDragging
               ? "cursor-grabbing pointer-events-auto"
               : "cursor-grab pointer-events-auto"
             : "pointer-events-none"
         }`}
-        aria-label="3D Z 字折疊空白信紙，可旋轉檢視或向下拉動展開"
+        aria-label={
+          isAwaitingSwipe
+            ? "向上滑動寄出已封緘的信封"
+            : "3D Z 字折疊空白信紙，可旋轉檢視或向下拉動展開"
+        }
       />
 
       {/* Quiet desktop flanking captions when folded */}
@@ -1564,7 +1769,7 @@ export const ZFoldLetterScene = forwardRef<
         <span className="hidden md:inline">
           DRAG TO ORBIT · PULL DOWN TO UNFOLD
         </span>
-        <span>{dateStamp}</span>
+        <span suppressHydrationWarning>{dateStamp || "\u00A0"}</span>
       </div>
 
       {/* Bottom Pull-to-Open Indicator when folded */}

@@ -47,8 +47,14 @@ import {
   ZFoldSceneHandle,
 } from "@/components/ZFoldLetterScene";
 import { BrushCustomizerPanel } from "@/components/BrushCustomizerPanel";
-import { GridSamplingOverlay } from "@/components/GridSamplingOverlay";
+import {
+  GridSamplingOverlay,
+  LiveLetterRect,
+} from "@/components/GridSamplingOverlay";
 import { LetterLibraryView } from "@/components/LetterLibraryView";
+import { PencilDraftingBox } from "@/components/PencilDraftingBox";
+import { SentMailboxNotice } from "@/components/SentMailboxNotice";
+import { SwipeUpSendGuide } from "@/components/SwipeUpSendGuide";
 import {
   SparkleColorTriplet,
   SparkleOverlayHandle,
@@ -63,7 +69,9 @@ type PostSendStage =
   | "confirm-save"
   | "dissolving"
   | "enveloping"
-  | "returning";
+  | "awaiting-swipe"
+  | "launching"
+  | "sent-notice";
 
 type UploadStatusState =
   | { state: "idle" }
@@ -71,7 +79,15 @@ type UploadStatusState =
   | { state: "success"; url: string; mailbox: MailboxNumber }
   | { state: "error"; message: string; canRetry: boolean };
 
+type HistorySnapshot = {
+  imageData: ImageData;
+  strokeCount: number;
+};
+
 const MAX_HISTORY = 5;
+const MIN_STROKES_TO_SEND = 2;
+const SEND_COOLDOWN_SEC = 30;
+const SEND_COOLDOWN_STORAGE_KEY = "light_msg_send_cooldown_until";
 
 export function LightMessageLetterApp() {
   const [sceneMode, setSceneMode] = useState<LetterSceneMode>("folded");
@@ -91,21 +107,31 @@ export function LightMessageLetterApp() {
   const [isBrushLabOpen, setIsBrushLabOpen] = useState<boolean>(false);
 
   const [hasStrokes, setHasStrokes] = useState<boolean>(false);
+  const [strokeCount, setStrokeCount] = useState<number>(0);
+  const [tooFewStrokesPhase, setTooFewStrokesPhase] = useState<
+    "hidden" | "visible" | "fading"
+  >("hidden");
+  const [cooldownRemainingSec, setCooldownRemainingSec] = useState<number>(0);
   const [showDrawGuide, setShowDrawGuide] = useState<boolean>(false);
   const hasShownGuideOnceRef = useRef<boolean>(false);
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [isClearing, setIsClearing] = useState<boolean>(false);
-  const [dateStamp] = useState<string>(() => getFormattedDateStamp());
+  // Keep initial value deterministic for SSR/hydration (avoids React #418 timezone mismatch);
+  // populated on client mount via requestAnimationFrame.
+  const [dateStamp, setDateStamp] = useState<string>("");
 
   // Measured exact DOM rect of the 2D paper slot so Three.js aligns pixel-for-pixel
   const [paperTargetRect, setPaperTargetRect] =
     useState<TargetPaperRect | null>(null);
 
-  // Post-send pipeline state (Step A snapshot + grid sampling result)
+  // Post-send pipeline state (Step A snapshot + Quadtree sampling + Swipe-to-send + Sent notice)
   const [savedLetterJpg, setSavedLetterJpg] = useState<string | null>(null);
   const [samplingResult, setSamplingResult] =
     useState<GridSamplingResult | null>(null);
+  const [settledStripCenterY, setSettledStripCenterY] = useState<number>(520);
+  const [swipeProgress, setSwipeProgress] = useState<number>(0);
+  const [sentMailbox, setSentMailbox] = useState<MailboxNumber>(1);
   const [isRefoldDragging, setIsRefoldDragging] = useState<boolean>(false);
 
   // Cloud R2 upload status, Mailbox (1..6) selection, & URL `?post` mode (default 0 = send home)
@@ -129,12 +155,22 @@ export function LightMessageLetterApp() {
   const dissolvePaletteRef = useRef<SparkleColorTriplet[]>([]);
   const stageTimerRef = useRef<number | null>(null);
   const uploadToastTimerRef = useRef<number | null>(null);
+  const tooFewFadeTimerRef = useRef<number | null>(null);
+  const tooFewHideTimerRef = useRef<number | null>(null);
+  const cooldownUntilRef = useRef<number>(0);
+  const strokeCountRef = useRef<number>(0);
   const pendingWebpPromiseRef = useRef<Promise<Blob> | null>(null);
   const lastUploadPayloadRef = useRef<{
     blob: Blob;
     mailbox: MailboxNumber;
   } | null>(null);
   const paperBoxRef = useRef<HTMLDivElement | null>(null);
+  const paperVisualRef = useRef<HTMLDivElement | null>(null);
+  const paperTransformStateRef = useRef<{
+    scale: number;
+    offsetY: number;
+    rafId: number;
+  }>({ scale: 1, offsetY: 0, rafId: 0 });
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasSizeRef = useRef<{ width: number; height: number; dpr: number }>({
     width: 0,
@@ -143,7 +179,7 @@ export function LightMessageLetterApp() {
   });
 
   // 5-Step Undo/Redo ImageData history stack (index 0 = initial blank + up to 5 steps)
-  const historyRef = useRef<ImageData[]>([]);
+  const historyRef = useRef<HistorySnapshot[]>([]);
   const historyIndexRef = useRef<number>(-1);
 
   // Active pointer drawing state refs
@@ -201,24 +237,6 @@ export function LightMessageLetterApp() {
     setCanRedo(idx >= 0 && idx < len - 1);
   }, []);
 
-  const pushHistorySnapshot = useCallback(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d", { willReadFrequently: true });
-    if (!canvas || !ctx || canvas.width === 0 || canvas.height === 0) return;
-
-    const snap = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const nextStack = historyRef.current.slice(0, historyIndexRef.current + 1);
-    nextStack.push(snap);
-
-    while (nextStack.length > MAX_HISTORY + 1) {
-      nextStack.shift();
-    }
-
-    historyRef.current = nextStack;
-    historyIndexRef.current = nextStack.length - 1;
-    updateHistoryFlags();
-  }, [updateHistoryFlags]);
-
   const checkCanvasHasInk = useCallback((imgData: ImageData): boolean => {
     const data = imgData.data;
     for (let i = 3; i < data.length; i += 16) {
@@ -226,6 +244,34 @@ export function LightMessageLetterApp() {
     }
     return false;
   }, []);
+
+  const pushHistorySnapshot = useCallback(
+    (nextStrokeCount: number) => {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d", { willReadFrequently: true });
+      if (!canvas || !ctx || canvas.width === 0 || canvas.height === 0) return;
+
+      const snap = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const hasInkNow = checkCanvasHasInk(snap);
+      const normalizedCount = hasInkNow ? nextStrokeCount : 0;
+
+      strokeCountRef.current = normalizedCount;
+      setStrokeCount(normalizedCount);
+      setHasStrokes(hasInkNow);
+
+      const nextStack = historyRef.current.slice(0, historyIndexRef.current + 1);
+      nextStack.push({ imageData: snap, strokeCount: normalizedCount });
+
+      while (nextStack.length > MAX_HISTORY + 1) {
+        nextStack.shift();
+      }
+
+      historyRef.current = nextStack;
+      historyIndexRef.current = nextStack.length - 1;
+      updateHistoryFlags();
+    },
+    [checkCanvasHasInk, updateHistoryFlags]
+  );
 
   const handleUndo = useCallback(() => {
     if (postSendStage !== "idle" || historyIndexRef.current <= 0) return;
@@ -236,8 +282,12 @@ export function LightMessageLetterApp() {
     historyIndexRef.current -= 1;
     const targetSnap = historyRef.current[historyIndexRef.current];
     if (targetSnap) {
-      ctx.putImageData(targetSnap, 0, 0);
-      setHasStrokes(checkCanvasHasInk(targetSnap));
+      ctx.putImageData(targetSnap.imageData, 0, 0);
+      const hasInkNow = checkCanvasHasInk(targetSnap.imageData);
+      const nextCount = hasInkNow ? targetSnap.strokeCount : 0;
+      strokeCountRef.current = nextCount;
+      setStrokeCount(nextCount);
+      setHasStrokes(hasInkNow);
     }
     updateHistoryFlags();
   }, [checkCanvasHasInk, postSendStage, updateHistoryFlags]);
@@ -256,8 +306,12 @@ export function LightMessageLetterApp() {
     historyIndexRef.current += 1;
     const targetSnap = historyRef.current[historyIndexRef.current];
     if (targetSnap) {
-      ctx.putImageData(targetSnap, 0, 0);
-      setHasStrokes(checkCanvasHasInk(targetSnap));
+      ctx.putImageData(targetSnap.imageData, 0, 0);
+      const hasInkNow = checkCanvasHasInk(targetSnap.imageData);
+      const nextCount = hasInkNow ? targetSnap.strokeCount : 0;
+      strokeCountRef.current = nextCount;
+      setStrokeCount(nextCount);
+      setHasStrokes(hasInkNow);
     }
     updateHistoryFlags();
   }, [checkCanvasHasInk, postSendStage, updateHistoryFlags]);
@@ -345,7 +399,9 @@ export function LightMessageLetterApp() {
         }
 
         const initSnap = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        historyRef.current = [initSnap];
+        historyRef.current = [
+          { imageData: initSnap, strokeCount: strokeCountRef.current },
+        ];
         historyIndexRef.current = 0;
         updateHistoryFlags();
       }
@@ -524,14 +580,18 @@ export function LightMessageLetterApp() {
 
         if (strokeModifiedRef.current) {
           strokeModifiedRef.current = false;
-          pushHistorySnapshot();
+          const nextCount =
+            tool === "brush"
+              ? strokeCountRef.current + 1
+              : strokeCountRef.current;
+          pushHistorySnapshot(nextCount);
         }
       }
       if (e.pointerType !== "mouse") {
         setEraserCursor((prev) => ({ ...prev, visible: false }));
       }
     },
-    [pushHistorySnapshot]
+    [pushHistorySnapshot, tool]
   );
 
   // Bottom small circle pull-up-to-refold handlers
@@ -619,8 +679,10 @@ export function LightMessageLetterApp() {
         const { dpr } = canvasSizeRef.current;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       }
+      strokeCountRef.current = 0;
+      setStrokeCount(0);
       setHasStrokes(false);
-      pushHistorySnapshot();
+      pushHistorySnapshot(0);
     }, 220);
 
     window.setTimeout(() => {
@@ -646,8 +708,8 @@ export function LightMessageLetterApp() {
     [returnToSendHome]
   );
 
-  // Detect `?post=1..6` on initial load & browser history navigation.
-  // Default (missing, `?post=0`, or invalid) stays strictly at `post = 0` (send-letter home page).
+  // Detect `?post=1..6` and populate client-local `dateStamp` safely after hydration
+  // (avoids React #418 SSR/client text mismatch across timezones).
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -662,11 +724,217 @@ export function LightMessageLetterApp() {
       }
     };
 
-    const rafId = window.requestAnimationFrame(applyPostParamFromLocation);
+    const rafId = window.requestAnimationFrame(() => {
+      setDateStamp(getFormattedDateStamp());
+      applyPostParamFromLocation();
+    });
     window.addEventListener("popstate", applyPostParamFromLocation);
     return () => {
       window.cancelAnimationFrame(rafId);
       window.removeEventListener("popstate", applyPostParamFromLocation);
+    };
+  }, []);
+
+  // Synchronized 60fps letter shrink & lift during sampling/confirm-save so the
+  // 30-CH Quadtree strip settles cleanly BELOW the letter without obstructing a single stroke!
+  const isCompactSamplingLayout =
+    postSendStage === "sampling" || postSendStage === "confirm-save";
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const computeTargets = () => {
+      if (!isCompactSamplingLayout || !paperBoxRef.current) {
+        return { targetScale: 1, targetOffsetY: 0, stripCenterY: window.innerHeight * 0.65 };
+      }
+
+      const rect = paperBoxRef.current.getBoundingClientRect();
+      const vpH = window.innerHeight;
+      const vpW = window.innerWidth;
+      const isMobile = vpW < 640;
+
+      // Exact vertical budget guaranteeing 0px overlap between:
+      // [Top margin] -> [Scaled letter] -> [Leader gap] -> [30-CH strip plate] -> [Gap] -> [Confirm card]
+      const confirmCardReserve = isMobile ? 228 : 204;
+      const gapStripToCard = isMobile ? 16 : 20;
+      const stripHalfBottom = 34; // plateBottom extends ~32px below stripCenterY
+      const stripHalfTop = 34; // plateTop extends ~32px above stripCenterY
+      const gapLetterToStrip = isMobile ? 20 : 26;
+      const topSafeMargin = isMobile ? 12 : 18;
+
+      const totalBelowLetter =
+        gapLetterToStrip +
+        stripHalfTop +
+        stripHalfBottom +
+        gapStripToCard +
+        confirmCardReserve;
+
+      const availLetterH = Math.max(150, vpH - topSafeMargin - totalBelowLetter);
+      const targetScale = Math.min(
+        0.72,
+        Math.max(0.34, availLetterH / Math.max(1, rect.height))
+      );
+      const scaledH = rect.height * targetScale;
+
+      const desiredTop =
+        topSafeMargin + Math.max(0, (availLetterH - scaledH) * 0.42);
+      const desiredCenterY = desiredTop + scaledH * 0.5;
+      const origCenterY = rect.top + rect.height * 0.5;
+      const targetOffsetY = desiredCenterY - origCenterY;
+
+      const letterBottom = desiredTop + scaledH;
+      const maxStripCenterY =
+        vpH - confirmCardReserve - gapStripToCard - stripHalfBottom;
+      const idealStripCenterY = letterBottom + gapLetterToStrip + stripHalfTop;
+      const stripCenterY = Math.min(maxStripCenterY, idealStripCenterY);
+
+      return { targetScale, targetOffsetY, stripCenterY };
+    };
+
+    const { targetScale, targetOffsetY, stripCenterY } = computeTargets();
+    const tState = paperTransformStateRef.current;
+    if (tState.rafId) {
+      window.cancelAnimationFrame(tState.rafId);
+      tState.rafId = 0;
+    }
+
+    const startScale = tState.scale;
+    const startOffsetY = tState.offsetY;
+    const startMs = performance.now();
+    const durationMs = 560;
+
+    const step = (now: number) => {
+      const p = Math.max(0, Math.min(1, (now - startMs) / durationMs));
+      const ease = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+      const curScale = startScale + (targetScale - startScale) * ease;
+      const curOffsetY = startOffsetY + (targetOffsetY - startOffsetY) * ease;
+
+      tState.scale = curScale;
+      tState.offsetY = curOffsetY;
+
+      if (paperVisualRef.current) {
+        paperVisualRef.current.style.transform =
+          curScale === 1 && Math.abs(curOffsetY) < 0.05
+            ? ""
+            : `translate3d(0, ${curOffsetY.toFixed(2)}px, 0) scale(${curScale.toFixed(4)})`;
+      }
+      sceneRef.current?.setPaperDisplayTransform(curScale, curOffsetY);
+
+      if (p < 1) {
+        tState.rafId = window.requestAnimationFrame(step);
+      } else {
+        tState.rafId = 0;
+      }
+    };
+
+    const initRaf = window.requestAnimationFrame((now) => {
+      if (isCompactSamplingLayout) {
+        setSettledStripCenterY(stripCenterY);
+      }
+      step(now);
+    });
+
+    const onResize = () => {
+      if (!isCompactSamplingLayout) return;
+      const next = computeTargets();
+      tState.scale = next.targetScale;
+      tState.offsetY = next.targetOffsetY;
+      if (paperVisualRef.current) {
+        paperVisualRef.current.style.transform = `translate3d(0, ${next.targetOffsetY.toFixed(2)}px, 0) scale(${next.targetScale.toFixed(4)})`;
+      }
+      sceneRef.current?.setPaperDisplayTransform(
+        next.targetScale,
+        next.targetOffsetY
+      );
+      setSettledStripCenterY(next.stripCenterY);
+    };
+
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.cancelAnimationFrame(initRaf);
+      if (tState.rafId) {
+        window.cancelAnimationFrame(tState.rafId);
+        tState.rafId = 0;
+      }
+      window.removeEventListener("resize", onResize);
+    };
+  }, [isCompactSamplingLayout]);
+
+  const getLiveLetterRect = useCallback((): LiveLetterRect | null => {
+    const el = paperVisualRef.current ?? paperBoxRef.current;
+    if (!el) return paperTargetRect;
+    const r = el.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) return paperTargetRect;
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  }, [paperTargetRect]);
+
+  // Start 30-second post-send cooldown (persisted to localStorage so refresh respects it)
+  const startSendCooldown = useCallback(() => {
+    const until = Date.now() + SEND_COOLDOWN_SEC * 1000;
+    cooldownUntilRef.current = until;
+    setCooldownRemainingSec(SEND_COOLDOWN_SEC);
+    try {
+      window.localStorage.setItem(SEND_COOLDOWN_STORAGE_KEY, String(until));
+    } catch {
+      // ignore storage quota / private mode
+    }
+  }, []);
+
+  // Show gentle fade-in -> hold -> fade-out prompt when user tries to send with < 2 strokes
+  const triggerTooFewStrokesHint = useCallback(() => {
+    if (tooFewFadeTimerRef.current !== null) {
+      window.clearTimeout(tooFewFadeTimerRef.current);
+    }
+    if (tooFewHideTimerRef.current !== null) {
+      window.clearTimeout(tooFewHideTimerRef.current);
+    }
+
+    setTooFewStrokesPhase("visible");
+
+    tooFewFadeTimerRef.current = window.setTimeout(() => {
+      setTooFewStrokesPhase("fading");
+    }, 2300);
+
+    tooFewHideTimerRef.current = window.setTimeout(() => {
+      setTooFewStrokesPhase("hidden");
+    }, 2950);
+  }, []);
+
+  // Hydrate persisted 30-second cooldown safely on mount & tick countdown smoothly
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const syncCooldown = () => {
+      const remMs = cooldownUntilRef.current - Date.now();
+      const remSec = remMs > 0 ? Math.ceil(remMs / 1000) : 0;
+      setCooldownRemainingSec((prev) => (prev === remSec ? prev : remSec));
+      if (remSec === 0 && cooldownUntilRef.current > 0) {
+        cooldownUntilRef.current = 0;
+        try {
+          window.localStorage.removeItem(SEND_COOLDOWN_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const rafId = window.requestAnimationFrame(() => {
+      try {
+        const stored = window.localStorage.getItem(SEND_COOLDOWN_STORAGE_KEY);
+        const parsed = stored ? Number(stored) : 0;
+        if (Number.isFinite(parsed) && parsed > Date.now()) {
+          cooldownUntilRef.current = parsed;
+          syncCooldown();
+        }
+      } catch {
+        // ignore
+      }
+    });
+
+    const intervalId = window.setInterval(syncCooldown, 250);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearInterval(intervalId);
     };
   }, []);
 
@@ -680,6 +948,14 @@ export function LightMessageLetterApp() {
       if (uploadToastTimerRef.current !== null) {
         window.clearTimeout(uploadToastTimerRef.current);
         uploadToastTimerRef.current = null;
+      }
+      if (tooFewFadeTimerRef.current !== null) {
+        window.clearTimeout(tooFewFadeTimerRef.current);
+        tooFewFadeTimerRef.current = null;
+      }
+      if (tooFewHideTimerRef.current !== null) {
+        window.clearTimeout(tooFewHideTimerRef.current);
+        tooFewHideTimerRef.current = null;
       }
     };
   }, []);
@@ -703,7 +979,8 @@ export function LightMessageLetterApp() {
       });
 
       try {
-        const safeStamp = dateStamp.replace(/\./g, "-");
+        const effectiveDate = dateStamp || getFormattedDateStamp();
+        const safeStamp = effectiveDate.replace(/\./g, "-");
         const savedRow = await uploadWebpBlobToLibrary(
           blob,
           mailbox,
@@ -761,51 +1038,78 @@ export function LightMessageLetterApp() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const freshSnap = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      historyRef.current = [freshSnap];
+      historyRef.current = [{ imageData: freshSnap, strokeCount: 0 }];
       historyIndexRef.current = 0;
       updateHistoryFlags();
     }
 
     dissolvePaletteRef.current = [];
+    strokeCountRef.current = 0;
+    setStrokeCount(0);
     setHasStrokes(false);
+    setTooFewStrokesPhase("hidden");
     setSavedLetterJpg(null);
     setSamplingResult(null);
+    setSwipeProgress(0);
     setPostSendStage("idle");
     setIsBrushLabOpen(false);
     setShowDrawGuide(false);
     setIsRefoldDragging(false);
     hasShownGuideOnceRef.current = false;
 
+    if (paperVisualRef.current) {
+      paperVisualRef.current.style.transform = "";
+    }
+    paperTransformStateRef.current.scale = 1;
+    paperTransformStateRef.current.offsetY = 0;
+
     sceneRef.current?.resetToFreshFolded();
   }, [updateHistoryFlags]);
 
   // =========================================================================
   // STAGE 1: PRESS "寄出"
-  // - 0ms snapshot high-res original JPG
+  // - 0ms snapshot high-res original JPG & WebP (0.85)
   // - Background smoothly darkens to matte black #0B0B0D (0.8s)
-  // - Grid scan & 30-CH strip translates down while original strokes stay 100% visible
-  //   (Sparkles & glow activate ONLY after user confirms save/skip in Stage 2)
+  // - Letter smoothly scales down & lifts so the 30-CH Quadtree strip settles
+  //   cleanly BELOW the paper without blocking any stroke!
   // =========================================================================
   const handleSendLetter = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas || postSendStage !== "idle" || sceneMode !== "flat") return;
 
+    // Respect 30-second post-send cooldown
+    if (cooldownRemainingSec > 0) return;
+
+    // Require at least 2 drawn strokes before allowing send
+    if (!hasStrokes || strokeCount < MIN_STROKES_TO_SEND) {
+      setIsBrushLabOpen(false);
+      triggerTooFewStrokesHint();
+      return;
+    }
+
     setIsBrushLabOpen(false);
     setShowDrawGuide(false);
+    setTooFewStrokesPhase("hidden");
     setEraserCursor((prev) => ({ ...prev, visible: false }));
 
     const { width, height } = canvasSizeRef.current;
+    const effectiveDate = dateStamp || getFormattedDateStamp();
 
     // 0ms: Synchronously composite stationery + original strokes into high-res JPG
     // AND asynchronously prepare `image/webp` (quality 0.85) Blob for direct R2 upload
     try {
-      const fullArtworkJpg = exportLetterAsJpg(canvas, width, height, dateStamp);
+      const fullArtworkJpg = exportLetterAsJpg(
+        canvas,
+        width,
+        height,
+        effectiveDate
+      );
       setSavedLetterJpg(fullArtworkJpg);
       pendingWebpPromiseRef.current = exportLetterAsWebpBlob(
         canvas,
         width,
         height,
-        dateStamp,
+        effectiveDate,
         0.85
       );
     } catch (err) {
@@ -813,13 +1117,21 @@ export function LightMessageLetterApp() {
       pendingWebpPromiseRef.current = null;
     }
 
-    // Quantize stationery grid cells & compute 30-CH [0..255] LED brightness sequence
+    // Run Best-First Quadtree detail-richness sampling -> 30-CH [0..255] + feature anchors
     const result = sampleDrawingToGridAnd30Led(canvas, width, height);
     publishLightSequenceToHardware(result.ledValues);
 
     setSamplingResult(result);
     setPostSendStage("sampling");
-  }, [dateStamp, postSendStage, sceneMode]);
+  }, [
+    cooldownRemainingSec,
+    dateStamp,
+    hasStrokes,
+    postSendStage,
+    sceneMode,
+    strokeCount,
+    triggerTooFewStrokesHint,
+  ]);
 
   // =========================================================================
   // STAGE 1 -> STAGE 2: 30-UNIT STRIP SETTLED -> SHOW MINIMALIST 3-BUTTON CARD
@@ -856,7 +1168,8 @@ export function LightMessageLetterApp() {
   const startStage3DissolveAndSend = useCallback(() => {
     const canvas = canvasRef.current;
     const liveRect =
-      paperBoxRef.current?.getBoundingClientRect() ?? paperTargetRect;
+      (paperVisualRef.current ?? paperBoxRef.current)?.getBoundingClientRect() ??
+      paperTargetRect;
     const normalizedRect =
       liveRect && liveRect.width > 10 && liveRect.height > 10
         ? {
@@ -869,6 +1182,8 @@ export function LightMessageLetterApp() {
 
     // 0. Kick off direct-to-R2 WebP upload & Supabase DB save in parallel with animation
     const targetMailbox = selectedMailbox;
+    setSentMailbox(targetMailbox);
+    setSwipeProgress(0);
     const webpPromise = pendingWebpPromiseRef.current;
     pendingWebpPromiseRef.current = null;
     if (webpPromise) {
@@ -904,7 +1219,7 @@ export function LightMessageLetterApp() {
       window.clearTimeout(stageTimerRef.current);
     }
 
-    // Wait for strokes & strip to dissolve into stardust before beginning 3D Z-fold showcase
+    // Wait for strokes & Quadtree overlay to dissolve before beginning 3D Z-fold showcase
     stageTimerRef.current = window.setTimeout(() => {
       // Stop outer perimeter ambient spawner so creases & envelope opening become the starlight source
       sparkleRef.current?.setAmbientActive(false, null);
@@ -912,23 +1227,34 @@ export function LightMessageLetterApp() {
 
       sceneRef.current?.startEnvelopeAndSend(
         () => {
-          // Stage 4.2: Envelope exited straight up -> gently dissipate sparkles & brighten bg back to white
+          // Stage 4.2: User swiped envelope straight up & it exited ->
+          // dissipate sparkles, brighten background to warm cotton paper,
+          // and slowly fade in pencil notice ("請到 N 號郵筒查看信件") for 5 seconds!
           sparkleRef.current?.fadeOutAndClear(false);
-          setPostSendStage("returning");
-
-          stageTimerRef.current = window.setTimeout(() => {
-            resetToFreshLoop();
-          }, 760);
+          setPostSendStage("sent-notice");
         },
         (burst) => {
           sparkleRef.current?.emitBurst({
             ...burst,
             palette: dissolvePaletteRef.current,
           });
+        },
+        {
+          onReadyToSwipe: () => {
+            setSwipeProgress(0);
+            setPostSendStage("awaiting-swipe");
+          },
+          onSwipeProgress: (p) => {
+            setSwipeProgress(p);
+          },
+          onSwipeLaunched: () => {
+            startSendCooldown();
+            setPostSendStage("launching");
+          },
         }
       );
     }, 1020);
-  }, [paperTargetRect, resetToFreshLoop, runDirectR2Upload, selectedMailbox]);
+  }, [paperTargetRect, runDirectR2Upload, selectedMailbox, startSendCooldown]);
 
   // Stage 2 Action 1: Download full hand-drawn letter JPG -> immediately launch Stage 3
   const handleSaveAndProceedToEnvelope = useCallback(() => {
@@ -957,7 +1283,9 @@ export function LightMessageLetterApp() {
     postSendStage === "sampling" ||
     postSendStage === "confirm-save" ||
     postSendStage === "dissolving" ||
-    postSendStage === "enveloping";
+    postSendStage === "enveloping" ||
+    postSendStage === "awaiting-swipe" ||
+    postSendStage === "launching";
 
   return (
     <div
@@ -1091,52 +1419,45 @@ export function LightMessageLetterApp() {
         {/* Center Paper Slot (exact pixel target for 3D flattened letter & Stage 1 scan) */}
         <main className="relative flex min-h-0 w-full max-w-[620px] flex-1 flex-col items-center justify-center pt-1 pb-6 sm:pb-7">
           <div ref={paperBoxRef} className="relative h-full max-h-[640px] w-full">
-            {/* Purely Transparent 2D Retina Drawing Canvas */}
-            <canvas
-              ref={canvasRef}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={endPointerStroke}
-              onPointerCancel={endPointerStroke}
-              onPointerLeave={() =>
-                setEraserCursor((prev) => ({ ...prev, visible: false }))
-              }
-              style={{
-                touchAction: "none",
-                opacity: isFlatEditable
-                  ? isClearing
-                    ? 0
-                    : 1
-                  : postSendStage === "sampling" ||
-                      postSendStage === "confirm-save"
-                    ? 1
-                    : 0,
-              }}
-              className={`relative z-10 block h-full w-full select-none ${
-                isFlatEditable ? "pointer-events-auto" : "pointer-events-none"
-              } ${tool === "eraser" ? "cursor-none" : "cursor-crosshair"} ${
-                postSendStage === "dissolving"
-                  ? "transition-opacity duration-[920ms] ease-out"
-                  : isClearing
-                    ? "transition-opacity duration-200"
-                    : ""
-              }`}
-              aria-label="一則光的訊息 手繪信紙畫布"
-            />
-
-            {/* STAGE 1 & STAGE 2: Grid Quantization Scan & Lower 30-Unit Strip (fades cleanly on Stage 3 dissolve) */}
-            {isSamplingOverlayMounted && samplingResult && (
-              <div
-                className={`pointer-events-none absolute inset-0 z-30 transition-opacity duration-[650ms] ease-out ${
-                  postSendStage === "dissolving" ? "opacity-0" : "opacity-100"
+            {/* Transformable Visual Wrapper synchronized 1:1 with 3D letter shrink/lift */}
+            <div
+              ref={paperVisualRef}
+              className="relative h-full w-full"
+              style={{ transformOrigin: "center center" }}
+            >
+              {/* Purely Transparent 2D Retina Drawing Canvas */}
+              <canvas
+                ref={canvasRef}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={endPointerStroke}
+                onPointerCancel={endPointerStroke}
+                onPointerLeave={() =>
+                  setEraserCursor((prev) => ({ ...prev, visible: false }))
+                }
+                style={{
+                  touchAction: "none",
+                  opacity: isFlatEditable
+                    ? isClearing
+                      ? 0
+                      : 1
+                    : postSendStage === "sampling" ||
+                        postSendStage === "confirm-save"
+                      ? 1
+                      : 0,
+                }}
+                className={`relative z-10 block h-full w-full select-none ${
+                  isFlatEditable ? "pointer-events-auto" : "pointer-events-none"
+                } ${tool === "eraser" ? "cursor-none" : "cursor-crosshair"} ${
+                  postSendStage === "dissolving"
+                    ? "transition-opacity duration-[920ms] ease-out"
+                    : isClearing
+                      ? "transition-opacity duration-200"
+                      : ""
                 }`}
-              >
-                <GridSamplingOverlay
-                  samplingResult={samplingResult}
-                  onComplete={handleSamplingComplete}
-                />
-              </div>
-            )}
+                aria-label="一則光的訊息 手繪信紙畫布"
+              />
+            </div>
 
             {/* Eraser Dynamic Dashed-Circle Cursor Overlay */}
             {isFlatEditable && tool === "eraser" && eraserCursor.visible && (
@@ -1163,6 +1484,27 @@ export function LightMessageLetterApp() {
                     "linear-gradient(90deg, rgba(250,249,246,0) 0%, rgba(250,249,246,0.94) 45%, rgba(255,255,255,0.98) 55%, rgba(250,249,246,0) 100%)",
                 }}
               />
+            )}
+
+            {/* Gentle Fade-In / Fade-Out Prompt when user tries to send with < 2 strokes */}
+            {isFlatEditable && tooFewStrokesPhase !== "hidden" && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center px-5"
+              >
+                <div
+                  className={`sketch-card border border-[#222222]/80 bg-[#FDFCF9]/95 px-5 py-3 text-center backdrop-blur-[2px] transition-all duration-500 ease-in-out ${
+                    tooFewStrokesPhase === "visible"
+                      ? "translate-y-0 opacity-100"
+                      : "-translate-y-1.5 opacity-0"
+                  }`}
+                >
+                  <p className="text-xs font-normal tracking-[0.16em] text-[#222222] sm:text-[13px]">
+                    你不可能只有這些想法吧～再多畫一點吧！
+                  </p>
+                </div>
+              </div>
             )}
 
             {/* Gentle Floating Guide Card after Unfolding */}
@@ -1425,14 +1767,29 @@ export function LightMessageLetterApp() {
               <button
                 type="button"
                 onClick={handleSendLetter}
-                disabled={postSendStage !== "idle"}
-                className="sketch-pill group ml-0.5 inline-flex h-8 items-center gap-1.5 border border-[#222222] bg-[#222222] px-4 text-xs font-normal tracking-[0.18em] text-[#FAF9F6] transition-all duration-300 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] hover:bg-[#FDFCF9] hover:text-[#222222] active:scale-[0.97]"
+                disabled={postSendStage !== "idle" || cooldownRemainingSec > 0}
+                title={
+                  cooldownRemainingSec > 0
+                    ? `寄出冷卻中，請稍候 ${cooldownRemainingSec} 秒`
+                    : "寄出信件"
+                }
+                className="sketch-pill group ml-0.5 inline-flex h-8 items-center gap-1.5 border border-[#222222] bg-[#222222] px-4 text-xs font-normal tracking-[0.16em] text-[#FAF9F6] transition-all duration-300 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] hover:bg-[#FDFCF9] hover:text-[#222222] active:scale-[0.97] disabled:cursor-not-allowed disabled:border-[#222222]/35 disabled:bg-[#222222]/10 disabled:text-[#222222]/55 disabled:hover:bg-[#222222]/10 disabled:hover:text-[#222222]/55"
               >
                 <PaperPlaneIcon
                   size={13}
-                  className="transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                  className={
+                    cooldownRemainingSec > 0
+                      ? "opacity-50"
+                      : "transition-transform duration-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                  }
                 />
-                <span>寄出</span>
+                {cooldownRemainingSec > 0 ? (
+                  <span className="font-mono text-[11px] tabular-nums tracking-[0.1em]">
+                    冷卻 {cooldownRemainingSec}s
+                  </span>
+                ) : (
+                  <span>寄出</span>
+                )}
               </button>
             </div>
           </div>
@@ -1440,156 +1797,143 @@ export function LightMessageLetterApp() {
       </div>
 
       {/* ================================================================= */}
-      {/* STAGE 2: MINIMALIST 1PX HIGH-CONTRAST SAVE CONFIRMATION CARD      */}
-      {/* Pure title + 3 buttons (Save JPG / Direct Send / Return to Edit)  */}
+      {/* STAGE 2: HAND-DRAWN PENCIL DRAFTING SAVE CONFIRMATION CARD        */}
+      {/* Symmetrically aligned with the 30-CH drafting plate above it      */}
       {/* ================================================================= */}
       {postSendStage === "confirm-save" && (
         <div
           role="dialog"
           aria-modal="false"
           aria-label="是否要儲存這張信紙？"
-          className="pointer-events-none fixed inset-x-0 bottom-3 z-50 flex justify-center px-3 sm:bottom-5 sm:px-6"
+          className="pointer-events-none fixed inset-x-0 bottom-3 z-50 flex justify-center px-4 sm:bottom-4 sm:px-6"
         >
-          <div className="sketch-card-dark animate-muji-modal-in pointer-events-auto relative flex w-full max-w-[560px] flex-col items-center border border-[#FAF9F6]/80 bg-[#121215]/95 px-5 py-4 backdrop-blur-[4px] sm:px-6 sm:py-5">
-            {/* Subtle hand-drawn corner ticks */}
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              className="pointer-events-none absolute top-2 left-2 text-[#F3D98B]/50"
-              aria-hidden="true"
-            >
-              <path
-                d="M1.5 8.5C1.3 5.5 1.7 3 1.5 1.5C3.8 1.6 6.2 1.3 8.5 1.5"
-                stroke="currentColor"
-                strokeWidth="1"
-                strokeLinecap="round"
-              />
-            </svg>
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              className="pointer-events-none absolute top-2 right-2 text-[#F3D98B]/50"
-              aria-hidden="true"
-            >
-              <path
-                d="M1.5 1.5C3.8 1.3 6.2 1.7 8.5 1.5C8.3 3.8 8.7 6.2 8.5 8.5"
-                stroke="currentColor"
-                strokeWidth="1"
-                strokeLinecap="round"
-              />
-            </svg>
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              className="pointer-events-none absolute bottom-2 left-2 text-[#F3D98B]/50"
-              aria-hidden="true"
-            >
-              <path
-                d="M1.5 1.5C1.7 3.8 1.3 6.2 1.5 8.5C3.8 8.3 6.2 8.7 8.5 8.5"
-                stroke="currentColor"
-                strokeWidth="1"
-                strokeLinecap="round"
-              />
-            </svg>
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 10 10"
-              fill="none"
-              className="pointer-events-none absolute right-2 bottom-2 text-[#F3D98B]/50"
-              aria-hidden="true"
-            >
-              <path
-                d="M8.5 1.5C8.7 3.8 8.3 6.2 8.5 8.5C6.2 8.7 3.8 8.3 1.5 8.5"
-                stroke="currentColor"
-                strokeWidth="1"
-                strokeLinecap="round"
-              />
-            </svg>
-
-            <h2 className="text-sm font-normal tracking-[0.24em] text-[#FAF9F6]">
-              是否要儲存這張信紙？
-            </h2>
-
-            {/* Mailbox Selector (1 ~ 6) */}
-            <div className="mt-3.5 w-full border-y border-[#FAF9F6]/15 py-2.5">
-              <div className="mb-2 flex items-center justify-between px-0.5">
-                <span className="text-[11px] font-light tracking-[0.18em] text-[#D8D8D2]">
-                  選擇投遞郵筒
-                </span>
-                <span className="font-mono text-[10px] tracking-[0.18em] text-[#F3D98B]">
-                  POST #{selectedMailbox}
-                </span>
+          <PencilDraftingBox className="animate-muji-modal-in pointer-events-auto w-full max-w-[520px] bg-[#121216]/92 px-4 py-3.5 backdrop-blur-[4px] sm:px-5 sm:py-4">
+            <div className="flex w-full flex-col items-center">
+              {/* Crisp top eyebrow metadata + clean centered single-line title */}
+              <div className="flex w-full items-center justify-between font-mono text-[8.5px] tracking-[0.2em]">
+                <span className="text-[#F3D98B]/60">CONFIRM // ARCHIVE</span>
+                <span className="text-[#F3D98B]">POST #{selectedMailbox}</span>
               </div>
-              <div
-                role="group"
-                aria-label="選擇 1 到 6 號郵筒"
-                className="grid grid-cols-6 gap-1.5"
-              >
-                {MAILBOX_NUMBERS.map((num) => {
-                  const active = selectedMailbox === num;
-                  return (
-                    <button
-                      key={num}
-                      type="button"
-                      onClick={() => setSelectedMailbox(num)}
-                      aria-pressed={active}
-                      aria-label={`郵筒 ${num}`}
-                      className={`sketch-pill-dark flex h-8 items-center justify-center border font-mono text-xs transition-all duration-200 active:scale-95 ${
-                        active
-                          ? "border-[#F3D98B] bg-[#F3D98B] font-medium text-[#141416]"
-                          : "border-[#FAF9F6]/30 bg-transparent text-[#FAF9F6]/80 hover:border-[#FAF9F6]/80 hover:text-[#FAF9F6]"
-                      }`}
-                    >
-                      {num}
-                    </button>
-                  );
-                })}
+
+              <h2 className="mt-1 whitespace-nowrap text-center text-[13.5px] font-normal tracking-[0.22em] text-[#FAF9F6] sm:text-sm">
+                是否要儲存這張信紙？
+              </h2>
+
+              {/* Mailbox Selector (1 ~ 6) */}
+              <div className="mt-2.5 w-full border-y border-dashed border-[#F3D98B]/22 py-2.5">
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-[10.5px] font-light tracking-[0.18em] text-[#D8D8D2]">
+                    選擇投遞郵筒
+                  </span>
+                  <span className="font-mono text-[8.5px] tracking-[0.16em] text-[#FAF9F6]/45">
+                    MAILBOX 01–06
+                  </span>
+                </div>
+                <div
+                  role="group"
+                  aria-label="選擇 1 到 6 號郵筒"
+                  className="grid w-full grid-cols-6 gap-1.5 sm:gap-2"
+                >
+                  {MAILBOX_NUMBERS.map((num) => {
+                    const active = selectedMailbox === num;
+                    return (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setSelectedMailbox(num)}
+                        aria-pressed={active}
+                        aria-label={`郵筒 ${num}`}
+                        className={`sketch-pill-dark flex h-7.5 w-full items-center justify-center border font-mono text-xs transition-all duration-200 active:scale-95 ${
+                          active
+                            ? "border-[#F3D98B] bg-[#F3D98B] font-medium text-[#141416]"
+                            : "border-[#FAF9F6]/28 bg-transparent text-[#FAF9F6]/80 hover:border-[#F3D98B]/75 hover:text-[#FAF9F6]"
+                        }`}
+                      >
+                        {num}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Three Action Buttons: cleanly proportioned & symmetrically padded */}
+              <div className="mt-2.5 grid w-full grid-cols-2 gap-2 sm:grid-cols-3">
+                <button
+                  type="button"
+                  onClick={handleSaveAndProceedToEnvelope}
+                  className="sketch-pill-dark inline-flex h-8.5 w-full items-center justify-center gap-1.5 whitespace-nowrap border border-[#F3D98B] bg-[#F3D98B] px-2.5 text-[11px] font-normal tracking-[0.1em] text-[#141416] transition-all duration-250 hover:border-[#FAF9F6] hover:bg-[#FAF9F6] active:scale-[0.98] sm:h-9 sm:text-xs"
+                >
+                  <DownloadIcon size={13} />
+                  <span>儲存信紙 (JPG)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSkipSaveAndProceedToEnvelope}
+                  className="sketch-pill-dark inline-flex h-8.5 w-full items-center justify-center gap-1.5 whitespace-nowrap border border-[#FAF9F6]/75 bg-transparent px-2.5 text-[11px] font-normal tracking-[0.1em] text-[#FAF9F6] transition-all duration-250 hover:bg-[#FAF9F6]/12 active:scale-[0.98] sm:h-9 sm:text-xs"
+                >
+                  <PaperPlaneIcon size={12} />
+                  <span>不儲存，直接寄出</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleReturnToEdit}
+                  className="sketch-pill-dark col-span-2 inline-flex h-7.5 w-full items-center justify-center whitespace-nowrap border border-[#FAF9F6]/30 bg-transparent px-3 text-[11px] font-light tracking-[0.16em] text-[#D8D8D2] transition-all duration-250 hover:border-[#FAF9F6]/75 hover:text-[#FAF9F6] active:scale-[0.98] sm:col-span-1 sm:h-9 sm:text-xs"
+                >
+                  <span>返回修改</span>
+                </button>
               </div>
             </div>
-
-            {/* Three Action Buttons: Save JPG / Send Directly / Return to Edit */}
-            <div className="mt-3.5 flex w-full flex-col gap-2 sm:flex-row sm:items-center">
-              <button
-                type="button"
-                onClick={handleSaveAndProceedToEnvelope}
-                className="sketch-pill-dark inline-flex h-9 flex-1 items-center justify-center gap-2 border border-[#F3D98B] bg-[#F3D98B] px-4 text-xs font-normal tracking-[0.14em] text-[#141416] transition-all duration-250 hover:bg-[#FAF9F6] hover:border-[#FAF9F6] active:scale-[0.98]"
-              >
-                <DownloadIcon size={14} />
-                <span>儲存信紙（JPG）</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleSkipSaveAndProceedToEnvelope}
-                className="sketch-pill-dark inline-flex h-9 flex-1 items-center justify-center gap-2 border border-[#FAF9F6]/85 bg-transparent px-4 text-xs font-normal tracking-[0.14em] text-[#FAF9F6] transition-all duration-250 hover:bg-[#FAF9F6]/12 active:scale-[0.98]"
-              >
-                <PaperPlaneIcon size={13} />
-                <span>不儲存，直接寄出</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleReturnToEdit}
-                className="sketch-pill-dark inline-flex h-9 items-center justify-center border border-[#FAF9F6]/35 bg-transparent px-4 text-xs font-light tracking-[0.14em] text-[#D8D8D2] transition-all duration-250 hover:border-[#FAF9F6]/80 hover:text-[#FAF9F6] active:scale-[0.98]"
-              >
-                <span>返回修改</span>
-              </button>
-            </div>
-          </div>
+          </PencilDraftingBox>
         </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* FULL-VIEWPORT QUADTREE SAMPLING + LEADER LINES + BELOW-LETTER BAR */}
+      {/* Persists during confirm-save so audience sees stroke -> 30-CH     */}
+      {/* ================================================================= */}
+      {isSamplingOverlayMounted && samplingResult && (
+        <div
+          className={`pointer-events-none fixed inset-0 z-30 transition-opacity duration-[650ms] ease-out ${
+            postSendStage === "dissolving" ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          <GridSamplingOverlay
+            samplingResult={samplingResult}
+            getLiveLetterRect={getLiveLetterRect}
+            settledStripCenterY={settledStripCenterY}
+            onComplete={handleSamplingComplete}
+          />
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* STAGE 3.5: INTERACTIVE SWIPE-UP-TO-SEND HAND-DRAWN GUIDE UI       */}
+      {/* ================================================================= */}
+      {postSendStage === "awaiting-swipe" && (
+        <SwipeUpSendGuide
+          swipeProgress={swipeProgress}
+          mailbox={sentMailbox}
+        />
+      )}
+
+      {/* ================================================================= */}
+      {/* STAGE 4.2: POST-SEND PENCIL NOTICE (FADE IN -> 5s HOLD -> FADE)   */}
+      {/* ================================================================= */}
+      {postSendStage === "sent-notice" && (
+        <SentMailboxNotice
+          mailbox={sentMailbox}
+          onFinished={resetToFreshLoop}
+        />
       )}
 
       {/* ================================================================= */}
       {/* DIRECT-TO-R2 UPLOAD STATUS TOAST (UPLOADING / SUCCESS / ERROR)    */}
       {/* ================================================================= */}
-      {uploadStatus.state !== "idle" && activePost === 0 && (
+      {uploadStatus.state !== "idle" &&
+        activePost === 0 &&
+        (postSendStage !== "sent-notice" || uploadStatus.state === "error") && (
         <div
           role="status"
           aria-live="polite"
