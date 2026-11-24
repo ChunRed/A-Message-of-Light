@@ -9,7 +9,7 @@ import {
 import { DownloadIcon } from "@/components/LetterIcons";
 
 interface LetterLibraryViewProps {
-  /** Strictly locked to a single mailbox (1..6) from `?post=1..6` */
+  /** Strictly locked to a single mailbox (1..5) from `?post=1..5` */
   mailbox: MailboxNumber;
   onWriteForMailbox?: (mailbox: MailboxNumber) => void;
   onClose: () => void;

@@ -885,21 +885,15 @@ function renderOrbitalRingFrame(
     }
   }
 
-  // 3. 1–2 tiny satellite mini hollow stars & dots near the ring
-  const miniX = cx + rx * 0.72 * cosT - -ry * 1.15 * sinT;
-  const miniY = cy + rx * 0.72 * sinT + -ry * 1.15 * cosT;
-  const mR = 5.5;
-  drawJitteryCrayonLine(ctx, miniX, miniY - mR, miniX, miniY + mR, rgbAccent, boilRng, {
-    stepPx: 2.5,
-    jitterAmp: 0.6,
-    thickness: 1.4,
-  });
-  drawJitteryCrayonLine(ctx, miniX - mR * 0.8, miniY, miniX + mR * 0.8, miniY, rgbAccent, boilRng, {
-    stepPx: 2.5,
-    jitterAmp: 0.6,
-    thickness: 1.4,
-  });
-
+  // 3. Subtle satellite crayon dots near the ring (no stray '+' cross)
+  drawCrayonDot(
+    ctx,
+    cx + rx * 0.72 * cosT - -ry * 1.15 * sinT,
+    cy + rx * 0.72 * sinT + -ry * 1.15 * cosT,
+    2.4,
+    rgbAccent,
+    boilRng
+  );
   drawCrayonDot(
     ctx,
     cx - rx * 0.76 * cosT,
@@ -921,8 +915,10 @@ function renderOrbitalRingFrame(
 }
 
 /**
- * Motif 4: Curved Crayon Comet Streak (inspired by Images 3 & 4)
- * 2–4 parallel broken rough pastel arcs sweeping toward a tilted crayon 4-point star at +X tip!
+ * Motif 4: Curved Crayon Comet Streak
+ * 3 parallel broken rough pastel arcs whose tangent at the star head points strictly
+ * along +X (angle = 0), while curving organically away to +Y (variant 0, clockwise arc
+ * for right/up-right travel) or -Y (variant 1, counter-clockwise arc for left/up-left travel).
  */
 function renderCrayonCometFrame(
   width: number,
@@ -941,74 +937,78 @@ function renderCrayonCometFrame(
   const shapeRng = createSeededRng(4019 + variant * 113);
   const boilRng = createSeededRng(boilSeed);
 
-  const curveSign = variant === 0 ? -1 : 1; // Curves gently up or down
-  const headX = width * 0.78;
+  // variant 0 (curveSign = +1): tail droops toward +Y (below path when flying RIGHT/UP-RIGHT)
+  // variant 1 (curveSign = -1): tail droops toward -Y (below path when flying LEFT/UP-LEFT)
+  const curveSign = variant === 0 ? 1 : -1;
+  const headX = width * 0.8;
   const headY = height * 0.5;
 
-  // 3 parallel broken rough pastel/crayon speed arcs trailing behind the star
+  // 3 parallel broken rough pastel/crayon arcs whose tangent at (x1, y1) is strictly +X (cpY === y1)
   const streakCount = 3;
   for (let s = 0; s < streakCount; s++) {
-    const laneOffset = (s - 1) * 11.5;
-    const lenRatio = s === 1 ? 0.66 : 0.54 + shapeRng() * 0.14;
+    const laneOffset = (s - 1) * 9.5;
+    const lenRatio = s === 1 ? 0.66 : 0.55 + shapeRng() * 0.12;
+    const x1 = headX - 15 - Math.abs(laneOffset) * 0.35;
+    const y1 = headY + laneOffset * 0.55;
     const x0 = headX - width * lenRatio;
-    const y0 = headY + laneOffset + curveSign * (22 + s * 4);
-    const x1 = headX - 16 - Math.abs(laneOffset) * 0.45;
-    const y1 = headY + laneOffset * 0.52;
-    const cpX = (x0 + x1) * 0.5 + 4;
-    const cpY = (y0 + y1) * 0.5 + curveSign * 14;
+    const arcDrop = 24 + s * 3.5;
+    const y0 = y1 + curveSign * arcDrop;
+    // Control point shares y1 so the Bezier arrives into the star head strictly tangent to +X!
+    const cpX = x0 + (x1 - x0) * 0.56;
+    const cpY = y1;
 
     const col = s === 2 ? rgbAccent : rgbMain;
-    const thick = s === 1 ? 4.2 : 3.2;
+    const thick = s === 1 ? 4.0 : 3.0;
 
     drawJitteryCrayonArc(ctx, x0, y0, cpX, cpY, x1, y1, col, boilRng, {
       stepPx: 3.6,
-      jitterAmp: 1.5,
+      jitterAmp: 1.35,
       thickness: thick,
-      brokenChance: 0.22,
+      brokenChance: 0.2,
       density: 1.08,
     });
   }
 
   // Tilted rough crayon 4-point star leading at the comet head
-  const starR = 14.5;
+  const starR = 14.0;
   ctx.save();
   ctx.translate(headX, headY);
-  ctx.rotate(curveSign * -0.22);
+  ctx.rotate(curveSign * 0.08);
   ctx.translate(-headX, -headY);
 
   fillConcave4PtStarWithCrayon(
     ctx,
     headX,
     headY,
-    starR * 1.15,
-    starR * 0.92,
-    starR * 1.05,
-    starR * 0.85,
+    starR * 1.12,
+    starR * 0.94,
+    starR * 1.04,
+    starR * 0.86,
     starR * 0.26,
     rgbMain,
     boilRng
   );
   // Crisp sketchy crayon rim
   const w = starR * 0.26;
-  drawJitteryCrayonArc(ctx, headX, headY - starR * 1.15, headX + w, headY - w, headX + starR * 0.92, headY, rgbAccent, boilRng, {
+  drawJitteryCrayonArc(ctx, headX, headY - starR * 1.12, headX + w, headY - w, headX + starR * 0.94, headY, rgbAccent, boilRng, {
     stepPx: 3.2,
     jitterAmp: 0.95,
     thickness: 1.7,
     overshoot: 1.2,
   });
-  drawJitteryCrayonArc(ctx, headX + starR * 0.92, headY, headX + w, headY + w, headX, headY + starR * 1.05, rgbMain, boilRng, {
+  drawJitteryCrayonArc(ctx, headX + starR * 0.94, headY, headX + w, headY + w, headX, headY + starR * 1.04, rgbMain, boilRng, {
     stepPx: 3.2,
     jitterAmp: 0.95,
     thickness: 1.7,
     overshoot: 1.2,
   });
-  drawJitteryCrayonArc(ctx, headX, headY + starR * 1.05, headX - w, headY + w, headX - starR * 0.85, headY, rgbMain, boilRng, {
+  drawJitteryCrayonArc(ctx, headX, headY + starR * 1.04, headX - w, headY + w, headX - starR * 0.86, headY, rgbMain, boilRng, {
     stepPx: 3.2,
     jitterAmp: 0.95,
     thickness: 1.7,
     overshoot: 1.2,
   });
-  drawJitteryCrayonArc(ctx, headX - starR * 0.85, headY, headX - w, headY - w, headX, headY - starR * 1.15, rgbAccent, boilRng, {
+  drawJitteryCrayonArc(ctx, headX - starR * 0.86, headY, headX - w, headY - w, headX, headY - starR * 1.12, rgbAccent, boilRng, {
     stepPx: 3.2,
     jitterAmp: 0.95,
     thickness: 1.7,
@@ -1016,16 +1016,16 @@ function renderCrayonCometFrame(
   });
   ctx.restore();
 
-  // Scattered trailing pastel flecks
-  drawCrayonDot(ctx, headX - width * 0.42, headY + curveSign * 22, 2.3, rgbAccent, boilRng);
-  drawCrayonDot(ctx, headX - width * 0.26, headY - curveSign * 14, 1.9, rgbMain, boilRng);
-  drawCrayonDot(ctx, headX - width * 0.56, headY + curveSign * 8, 2.0, rgbMain, boilRng);
+  // Scattered trailing pastel flecks along the curved wake
+  drawCrayonDot(ctx, headX - width * 0.36, headY + curveSign * 14, 2.2, rgbAccent, boilRng);
+  drawCrayonDot(ctx, headX - width * 0.56, headY + curveSign * 26, 2.0, rgbMain, boilRng);
+  drawCrayonDot(ctx, headX - width * 0.22, headY - curveSign * 10, 1.7, rgbMain, boilRng);
 
   return canvas;
 }
 
 /**
- * Motif 5: Crayon Dust, Mini Hand-Drawn +/× Crosses & Pastel Spray Specks
+ * Motif 5: Organic Crayon Dust & Pastel Spray Specks (clean dot clusters, zero stray crosses)
  */
 function renderCrayonDustFrame(
   size: number,
@@ -1045,39 +1045,14 @@ function renderCrayonDustFrame(
   const cy = size * 0.5;
 
   if (variant === 0) {
-    // Mini jittery hand-drawn '+' cross + 2 flecks
-    const arm = size * 0.22;
-    drawJitteryCrayonLine(ctx, cx, cy - arm * 1.15, cx, cy + arm * 1.1, rgbMain, boilRng, {
-      stepPx: 3.0,
-      jitterAmp: 0.75,
-      thickness: 1.9,
-      overshootStart: 0.8,
-      overshootEnd: 0.8,
-    });
-    drawJitteryCrayonLine(ctx, cx - arm * 0.9, cy, cx + arm * 0.95, cy, rgbMain, boilRng, {
-      stepPx: 3.0,
-      jitterAmp: 0.75,
-      thickness: 1.9,
-      overshootStart: 0.8,
-      overshootEnd: 0.8,
-    });
-    drawCrayonDot(ctx, cx + arm * 0.9, cy - arm * 0.8, 1.8, rgbAccent, boilRng);
+    drawCrayonDot(ctx, cx, cy, 3.0, rgbMain, boilRng);
+    drawCrayonDot(ctx, cx + 9, cy - 5, 1.9, rgbAccent, boilRng);
+    drawCrayonDot(ctx, cx - 8, cy + 6, 1.6, rgbMain, boilRng);
   } else if (variant === 1) {
-    // Mini tilted '×' cross + chalk specks
-    const arm = size * 0.19;
-    drawJitteryCrayonLine(ctx, cx - arm, cy - arm, cx + arm, cy + arm, rgbMain, boilRng, {
-      stepPx: 3.0,
-      jitterAmp: 0.75,
-      thickness: 1.8,
-    });
-    drawJitteryCrayonLine(ctx, cx + arm, cy - arm, cx - arm, cy + arm, rgbMain, boilRng, {
-      stepPx: 3.0,
-      jitterAmp: 0.75,
-      thickness: 1.8,
-    });
-    drawCrayonDot(ctx, cx - arm * 1.1, cy + arm * 0.5, 1.7, rgbAccent, boilRng);
+    drawCrayonDot(ctx, cx - 3, cy - 2, 2.6, rgbAccent, boilRng);
+    drawCrayonDot(ctx, cx + 8, cy + 5, 2.2, rgbMain, boilRng);
+    drawCrayonDot(ctx, cx - 9, cy + 7, 1.5, rgbAccent, boilRng);
   } else {
-    // Cluster of rough irregular crayon dots & pastel spray dust
     drawCrayonDot(ctx, cx, cy, 3.2, rgbMain, boilRng);
     drawCrayonDot(ctx, cx + 10, cy - 7, 2.1, rgbAccent, boilRng);
     drawCrayonDot(ctx, cx - 9, cy + 8, 1.8, rgbMain, boilRng);
@@ -1171,6 +1146,8 @@ interface HandDrawnParticle {
   swatch: SparkleColorTriplet;
   rotation: number;
   rotSpeed: number;
+  /** Angular turning rate (rad/s) for curved-tail comets matching exact tail curvature */
+  turnRate: number;
   alignToVelocity: boolean;
   twinkleFreq: number;
   twinklePhase: number;
@@ -1217,25 +1194,32 @@ function createHandDrawnParticle(
 ): HandDrawnParticle {
   const variantCount = motif === "crayon-dust" ? 3 : 2;
   const isComet = motif === "crayon-comet";
+  // Match comet sprite curvature strictly to travel side:
+  // Rightward (vx >= 0): variant 0 (tail droops below-left) + clockwise turnRate (> 0)
+  // Leftward  (vx <  0): variant 1 (tail droops below-right) + counter-clockwise turnRate (< 0)
+  const goingRight = vx >= 0;
+  const cometVariant = goingRight ? 0 : 1;
+  const cometTurnRate = (goingRight ? 1 : -1) * (0.28 + Math.random() * 0.16);
 
   return {
     x,
     y,
     vx,
     vy,
-    drag: isComet ? 0.978 : 0.986 - Math.random() * 0.01,
-    buoyancy: isComet ? -(10 + Math.random() * 18) : -(12 + Math.random() * 22),
-    swayAmp: isComet ? 6 + Math.random() * 10 : 8 + Math.random() * 16,
+    drag: isComet ? 0.988 : 0.986 - Math.random() * 0.01,
+    buoyancy: isComet ? 0 : -(12 + Math.random() * 20),
+    swayAmp: isComet ? 0 : 8 + Math.random() * 14,
     swayFreq: 1.0 + Math.random() * 1.5,
     swayPhase: Math.random() * Math.PI * 2,
     scale,
     motif,
-    variantIdx: Math.floor(Math.random() * variantCount),
+    variantIdx: isComet ? cometVariant : Math.floor(Math.random() * variantCount),
     swatch,
     rotation: isComet
       ? Math.atan2(vy, vx)
       : (Math.random() - 0.5) * 0.45,
     rotSpeed: isComet ? 0 : (Math.random() - 0.5) * 0.24,
+    turnRate: isComet ? cometTurnRate : 0,
     alignToVelocity: isComet,
     twinkleFreq: 2.6 + Math.random() * 3.8,
     twinklePhase: Math.random() * Math.PI * 2,
@@ -1245,6 +1229,15 @@ function createHandDrawnParticle(
     life,
     maxAlpha: 0.88 + Math.random() * 0.12,
   };
+}
+
+/**
+ * Picks a graceful outward left/up-left or right/up-right launch angle (never straight up or down).
+ */
+function sampleOutwardSideAngle(goRight: boolean): number {
+  // Elevation above horizontal: -6° to +42° (pure left/right or up-left/up-right)
+  const elev = -0.1 + Math.random() * 0.84; // rad: -0.10 .. +0.74
+  return goRight ? -elev : Math.PI + elev;
 }
 
 export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
@@ -1430,25 +1423,24 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
           }
 
           const dragPow = Math.pow(p.drag, dt * 60);
-          p.vx *= dragPow;
-          p.vy = p.vy * dragPow + p.buoyancy * dt;
-
-          const sway =
-            Math.cos(p.age * p.swayFreq + p.swayPhase) * p.swayAmp * dt;
-          p.x += p.vx * dt + sway;
-          p.y += p.vy * dt;
-
           if (p.alignToVelocity) {
-            const speed = Math.hypot(p.vx, p.vy);
-            if (speed > 4) {
-              const targetAngle = Math.atan2(p.vy, p.vx);
-              // Smoothly align curved crayon comet streaks along trajectory
-              let diff = targetAngle - p.rotation;
-              while (diff > Math.PI) diff -= Math.PI * 2;
-              while (diff < -Math.PI) diff += Math.PI * 2;
-              p.rotation += diff * Math.min(1, dt * 6.5);
-            }
+            // Pure curved-arc kinematics for tail-trailing comets:
+            // moves strictly forward along head tangent & gently bends along tail curvature!
+            const nextSpeed = Math.hypot(p.vx, p.vy) * dragPow;
+            const nextHeading = Math.atan2(p.vy, p.vx) + p.turnRate * dt;
+            p.vx = Math.cos(nextHeading) * nextSpeed;
+            p.vy = Math.sin(nextHeading) * nextSpeed;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.rotation = nextHeading;
           } else {
+            p.vx *= dragPow;
+            p.vy = p.vy * dragPow + p.buoyancy * dt;
+
+            const sway =
+              Math.cos(p.age * p.swayFreq + p.swayPhase) * p.swayAmp * dt;
+            p.x += p.vx * dt + sway;
+            p.y += p.vy * dt;
             p.rotation += p.rotSpeed * dt;
           }
 
@@ -1676,15 +1668,21 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
                           ? "orbital-ring"
                           : "crayon-dust";
 
-              const angle = -Math.PI / 2 + (Math.random() - 0.5) * 1.9;
+              // Fan outward left/up-left from left half of paper, right/up-right from right half
+              const paperCenterX = paperRect.left + paperRect.width * 0.5;
+              const goRight =
+                Math.abs(s.x - paperCenterX) < 12
+                  ? spawned % 2 === 0
+                  : s.x >= paperCenterX;
+              const angle = sampleOutwardSideAngle(goRight);
               const speed =
                 motif === "crayon-comet"
-                  ? 62 + Math.random() * 78
-                  : 26 + Math.random() * 56;
+                  ? 82 + Math.random() * 68
+                  : 32 + Math.random() * 52;
 
               const scale =
                 motif === "crayon-comet"
-                  ? 0.52 + Math.random() * 0.26
+                  ? 0.52 + Math.random() * 0.24
                   : motif === "orbital-ring"
                     ? 0.54 + Math.random() * 0.22
                     : motif === "sparkler-burst"
@@ -1700,7 +1698,7 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
                 s.x,
                 s.y,
                 Math.cos(angle) * speed,
-                Math.sin(angle) * speed - 20,
+                Math.sin(angle) * speed,
                 scale,
                 life,
                 s.swatch,
@@ -1710,7 +1708,7 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
               list.push(p);
             }
           } else {
-            // Blank letter: release 16 well-spaced hand-drawn stars & curved crayon comets
+            // Blank letter: fan outward left/up-left and right/up-right from center
             const cx = paperRect.left + paperRect.width / 2;
             const cy = paperRect.top + paperRect.height / 2;
             const motifs: MotifKind[] = [
@@ -1722,16 +1720,17 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
               "crayon-dust",
             ];
             for (let i = 0; i < 16 && list.length < MAX_PARTICLES; i++) {
-              const ang = -Math.PI / 2 + (Math.random() - 0.5) * 2.4;
+              const goRight = i % 2 === 0;
+              const ang = sampleOutwardSideAngle(goRight);
               const motif = motifs[i % motifs.length];
-              const spd = motif === "crayon-comet" ? 68 + Math.random() * 52 : 24 + Math.random() * 44;
+              const spd = motif === "crayon-comet" ? 84 + Math.random() * 52 : 30 + Math.random() * 44;
               list.push(
                 createHandDrawnParticle(
-                  cx + (Math.random() - 0.5) * paperRect.width * 0.55,
+                  cx + (goRight ? 1 : -1) * (8 + Math.random() * paperRect.width * 0.24),
                   cy + (Math.random() - 0.5) * paperRect.height * 0.45,
                   Math.cos(ang) * spd,
-                  Math.sin(ang) * spd - 16,
-                  motif === "crayon-comet" ? 0.58 : 0.5,
+                  Math.sin(ang) * spd,
+                  motif === "crayon-comet" ? 0.56 : 0.5,
                   1.6 + Math.random() * 1.3,
                   i % 3 === 0 ? CHALK_WHITE : CREAM_GOLD,
                   motif,
@@ -1776,11 +1775,6 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
               list.shift();
             }
 
-            const ang = Math.random() * Math.PI * 2;
-            const spd = speedMin + Math.random() * (speedMax - speedMin);
-            const vx = Math.cos(ang) * spd + vxBias;
-            const vy = Math.sin(ang) * spd + vyBias;
-
             const roll = Math.random();
             const motif: MotifKind =
               roll < 0.26
@@ -1794,6 +1788,24 @@ export const SparkleParticleOverlay = forwardRef<SparkleOverlayHandle>(
                       : roll < 0.88
                         ? "orbital-ring"
                         : "crayon-dust";
+
+            // Fan outward left/up-left or right/up-right from the burst center
+            const goRight =
+              Math.abs(px - x) < 6 ? Math.random() < 0.5 : px >= x;
+            const ang = sampleOutwardSideAngle(goRight);
+            const spd =
+              motif === "crayon-comet"
+                ? Math.max(76, speedMin + Math.random() * (speedMax - speedMin))
+                : speedMin + Math.random() * (speedMax - speedMin);
+            // Keep comet launch vectors cleanly lateral/up-lateral (never vertical up/down)
+            const vx =
+              motif === "crayon-comet"
+                ? Math.cos(ang) * spd + vxBias * 0.2
+                : Math.cos(ang) * spd + vxBias * 0.5;
+            const vy =
+              motif === "crayon-comet"
+                ? Math.sin(ang) * spd
+                : Math.sin(ang) * spd + vyBias * 0.25;
 
             const baseScale =
               motif === "crayon-comet"

@@ -133,6 +133,34 @@ body {
   }
 }
 
+@keyframes hint-pull-down {
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(5px);
+  }
+}
+
+@keyframes hint-turn-back {
+  0%,
+  100% {
+    transform: translateX(0px);
+  }
+  50% {
+    transform: translateX(4px);
+  }
+}
+
+.animate-hint-pull-down {
+  animation: hint-pull-down 2.1s ease-in-out infinite;
+}
+
+.animate-hint-turn-back {
+  animation: hint-turn-back 2.3s ease-in-out infinite;
+}
+
 .animate-float-gentle {
   animation: float-gentle 4.8s ease-in-out infinite;
 }

@@ -1,4 +1,4 @@
-export const MAILBOX_NUMBERS = [1, 2, 3, 4, 5, 6] as const;
+export const MAILBOX_NUMBERS = [1, 2, 3, 4, 5] as const;
 export type MailboxNumber = (typeof MAILBOX_NUMBERS)[number];
 
 export interface PresignedUploadResponse {
@@ -28,14 +28,14 @@ export type UploadProgressPhase =
   | "saving-record";
 
 /**
- * Strictly parses a `post` / `mailbox` value into 1..6 (rejects 0, "", or out-of-range values).
+ * Strictly parses a `post` / `mailbox` value into 1..5 (rejects 0, "", or out-of-range values).
  */
 export function parseMailboxParam(
   raw: string | number | null | undefined
 ): MailboxNumber | null {
   if (raw === null || raw === undefined) return null;
   const trimmed = String(raw).trim();
-  if (!/^[1-6]$/.test(trimmed)) return null;
+  if (!/^[1-5]$/.test(trimmed)) return null;
   return Number.parseInt(trimmed, 10) as MailboxNumber;
 }
 
@@ -182,7 +182,7 @@ export async function uploadWebpBlobToLibrary(
 
 /**
  * Fetches paginated images ordered newest-first from GET ${API_BASE_URL}/api/images.
- * When `post` (1..6) is provided, appends `&post=<N>` to filter strictly by that mailbox.
+ * When `post` (1..5) is provided, appends `&post=<N>` to filter strictly by that mailbox.
  */
 export async function fetchLibraryImages(
   page = 1,

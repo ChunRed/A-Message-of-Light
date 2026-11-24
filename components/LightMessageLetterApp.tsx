@@ -24,7 +24,6 @@ import {
   sampleDrawingToGridAnd30Led,
 } from "@/lib/grid-sampling";
 import {
-  MAILBOX_NUMBERS,
   MailboxNumber,
   parseMailboxParam,
   UploadProgressPhase,
@@ -41,7 +40,9 @@ import {
   UndoIcon,
 } from "@/components/LetterIcons";
 import {
+  IntroEraserCursorState,
   LetterSceneMode,
+  MailboxTargetScreenPoint,
   TargetPaperRect,
   ZFoldLetterScene,
   ZFoldSceneHandle,
@@ -52,6 +53,7 @@ import {
   LiveLetterRect,
 } from "@/components/GridSamplingOverlay";
 import { LetterLibraryView } from "@/components/LetterLibraryView";
+import { PaperPencilGuide } from "@/components/PaperPencilGuide";
 import { PencilDraftingBox } from "@/components/PencilDraftingBox";
 import { SentMailboxNotice } from "@/components/SentMailboxNotice";
 import { SwipeUpSendGuide } from "@/components/SwipeUpSendGuide";
@@ -60,9 +62,11 @@ import {
   SparkleOverlayHandle,
   SparkleParticleOverlay,
 } from "@/components/SparkleParticleOverlay";
+import { YanshuiPaperIllustration } from "@/components/YanshuiPaperIllustration";
 
 type ToolMode = "brush" | "eraser";
 type ActivePostMode = 0 | MailboxNumber;
+type IntroSequencePhase = "pending" | "reading" | "erasing" | "guide" | "ready";
 type PostSendStage =
   | "idle"
   | "sampling"
@@ -112,8 +116,14 @@ export function LightMessageLetterApp() {
     "hidden" | "visible" | "fading"
   >("hidden");
   const [cooldownRemainingSec, setCooldownRemainingSec] = useState<number>(0);
+  const [introSequencePhase, setIntroSequencePhase] =
+    useState<IntroSequencePhase>("pending");
+  const introSequencePhaseRef = useRef<IntroSequencePhase>("pending");
+  const [celebrationCycleId, setCelebrationCycleId] = useState<number>(0);
+  const [isErasingIllustrations, setIsErasingIllustrations] =
+    useState<boolean>(false);
   const [showDrawGuide, setShowDrawGuide] = useState<boolean>(false);
-  const hasShownGuideOnceRef = useRef<boolean>(false);
+  const [isEnvelopeSealed, setIsEnvelopeSealed] = useState<boolean>(false);
   const [canUndo, setCanUndo] = useState<boolean>(false);
   const [canRedo, setCanRedo] = useState<boolean>(false);
   const [isClearing, setIsClearing] = useState<boolean>(false);
@@ -131,11 +141,12 @@ export function LightMessageLetterApp() {
     useState<GridSamplingResult | null>(null);
   const [settledStripCenterY, setSettledStripCenterY] = useState<number>(520);
   const [swipeProgress, setSwipeProgress] = useState<number>(0);
+  const [targetedMailbox, setTargetedMailbox] = useState<MailboxNumber | null>(null);
+  const [launchedMailbox, setLaunchedMailbox] = useState<MailboxNumber | null>(null);
   const [sentMailbox, setSentMailbox] = useState<MailboxNumber>(1);
   const [isRefoldDragging, setIsRefoldDragging] = useState<boolean>(false);
 
-  // Cloud R2 upload status, Mailbox (1..6) selection, & URL `?post` mode (default 0 = send home)
-  const [selectedMailbox, setSelectedMailbox] = useState<MailboxNumber>(1);
+  // Cloud R2 upload status & URL `?post` mode (default 0 = send home)
   const [activePost, setActivePost] = useState<ActivePostMode>(0);
   const [libraryRefreshSignal, setLibraryRefreshSignal] = useState<number>(0);
   const [uploadStatus, setUploadStatus] = useState<UploadStatusState>({
@@ -154,6 +165,9 @@ export function LightMessageLetterApp() {
   const sparkleRef = useRef<SparkleOverlayHandle | null>(null);
   const dissolvePaletteRef = useRef<SparkleColorTriplet[]>([]);
   const stageTimerRef = useRef<number | null>(null);
+  const dissolveStepTimerRef = useRef<number | null>(null);
+  const introReadTimerRef = useRef<number | null>(null);
+  const introEraserIndicatorRef = useRef<HTMLDivElement | null>(null);
   const uploadToastTimerRef = useRef<number | null>(null);
   const tooFewFadeTimerRef = useRef<number | null>(null);
   const tooFewHideTimerRef = useRef<number | null>(null);
@@ -329,19 +343,80 @@ export function LightMessageLetterApp() {
     setTool("brush");
   }, []);
 
-  const handleSceneModeChange = useCallback((nextMode: LetterSceneMode) => {
-    setSceneMode(nextMode);
-    if (nextMode === "flat") {
-      sceneRef.current?.syncDrawingCanvas(null);
-      if (!hasShownGuideOnceRef.current) {
-        hasShownGuideOnceRef.current = true;
-        setShowDrawGuide(true);
+  const updateIntroEraserIndicator = useCallback(
+    (cursor: IntroEraserCursorState) => {
+      const el = introEraserIndicatorRef.current;
+      if (!el) return;
+      if (!cursor.visible || cursor.opacity <= 0.01) {
+        el.style.opacity = "0";
+        return;
       }
-    } else if (nextMode === "folded") {
-      setIsBrushLabOpen(false);
-      setShowDrawGuide(false);
-    }
+      const boxW = paperBoxRef.current?.clientWidth || 420;
+      const sizePx = Math.max(24, Math.min(54, cursor.diameterNorm * boxW));
+      const liftScale = cursor.isErasing ? 1 : 1.08;
+      const tiltDeg = cursor.tiltDeg ?? 0;
+      el.style.width = `${sizePx.toFixed(1)}px`;
+      el.style.height = `${sizePx.toFixed(1)}px`;
+      el.style.left = `${(cursor.u * 100).toFixed(3)}%`;
+      el.style.top = `${(cursor.v * 100).toFixed(3)}%`;
+      el.style.opacity = cursor.opacity.toFixed(3);
+      el.style.transform = `translate(-50%, -50%) rotate(${tiltDeg.toFixed(1)}deg) scale(${liftScale})`;
+    },
+    []
+  );
+
+  const handleBeginGuideErasing = useCallback(() => {
+    setIsErasingIllustrations(true);
   }, []);
+
+  const handleStartCreating = useCallback(() => {
+    setIsErasingIllustrations(false);
+    setShowDrawGuide(false);
+    introSequencePhaseRef.current = "ready";
+    setIntroSequencePhase("ready");
+  }, []);
+
+  const handleSceneModeChange = useCallback(
+    (nextMode: LetterSceneMode) => {
+      setSceneMode(nextMode);
+      if (nextMode === "flat") {
+        sceneRef.current?.syncDrawingCanvas(null);
+        // Opening 100% unfold choreography:
+        // 0.0s - 3.0s: Hold inner-fold paper texts cleanly for reading (locked)
+        // 3.0s - 4.2s: Auto rubber-eraser sweep wipes texts to blank grid paper
+        // 4.2s: Fade in Creation Guide Modal until user clicks "開始創作"
+        if (introSequencePhaseRef.current === "pending") {
+          introSequencePhaseRef.current = "reading";
+          setIntroSequencePhase("reading");
+          setCelebrationCycleId((c) => c + 1);
+          if (introReadTimerRef.current !== null) {
+            window.clearTimeout(introReadTimerRef.current);
+          }
+          introReadTimerRef.current = window.setTimeout(() => {
+            introReadTimerRef.current = null;
+            if (introSequencePhaseRef.current !== "reading") return;
+            introSequencePhaseRef.current = "erasing";
+            setIntroSequencePhase("erasing");
+            sceneRef.current?.playIntroEraserAnimation({
+              onCursorUpdate: updateIntroEraserIndicator,
+              onComplete: () => {
+                if (introEraserIndicatorRef.current) {
+                  introEraserIndicatorRef.current.style.opacity = "0";
+                }
+                introSequencePhaseRef.current = "guide";
+                setIntroSequencePhase("guide");
+                setShowDrawGuide(true);
+              },
+            });
+          }, 3000);
+        }
+      } else if (nextMode === "folded") {
+        setIsBrushLabOpen(false);
+        setShowDrawGuide(false);
+      }
+    },
+    [updateIntroEraserIndicator]
+  );
 
   // Measure paperBoxRef and maintain Retina drawing canvas
   useEffect(() => {
@@ -437,14 +512,20 @@ export function LightMessageLetterApp() {
     []
   );
 
-  // Pointer drawing handlers (locked automatically whenever postSendStage !== "idle")
+  // Pointer drawing handlers (locked while intro sequence runs or postSendStage !== "idle")
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
-      if (sceneMode !== "flat" || postSendStage !== "idle" || isClearing) return;
+      if (
+        sceneMode !== "flat" ||
+        postSendStage !== "idle" ||
+        introSequencePhase !== "ready" ||
+        isClearing
+      ) {
+        return;
+      }
       if (e.button !== 0 && e.pointerType === "mouse") return;
 
       if (isBrushLabOpen) setIsBrushLabOpen(false);
-      if (showDrawGuide) setShowDrawGuide(false);
 
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d", { willReadFrequently: true });
@@ -483,11 +564,11 @@ export function LightMessageLetterApp() {
       currentSize.eraserDiameter,
       getCanvasPoint,
       hasStrokes,
+      introSequencePhase,
       isBrushLabOpen,
       isClearing,
       postSendStage,
       sceneMode,
-      showDrawGuide,
       tool,
     ]
   );
@@ -496,7 +577,12 @@ export function LightMessageLetterApp() {
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       const pt = getCanvasPoint(e);
 
-      if (tool === "eraser" && sceneMode === "flat" && postSendStage === "idle") {
+      if (
+        tool === "eraser" &&
+        sceneMode === "flat" &&
+        postSendStage === "idle" &&
+        introSequencePhase === "ready"
+      ) {
         setEraserCursor({ x: pt.x, y: pt.y, visible: true });
       }
 
@@ -560,6 +646,7 @@ export function LightMessageLetterApp() {
       activeBrushParams,
       currentSize.eraserDiameter,
       getCanvasPoint,
+      introSequencePhase,
       postSendStage,
       sceneMode,
       tool,
@@ -597,7 +684,13 @@ export function LightMessageLetterApp() {
   // Bottom small circle pull-up-to-refold handlers
   const handleRefoldPointerDown = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>) => {
-      if (sceneMode !== "flat" || postSendStage !== "idle") return;
+      if (
+        sceneMode !== "flat" ||
+        postSendStage !== "idle" ||
+        introSequencePhase !== "ready"
+      ) {
+        return;
+      }
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
       setIsBrushLabOpen(false);
@@ -615,7 +708,7 @@ export function LightMessageLetterApp() {
         moved: false,
       };
     },
-    [postSendStage, sceneMode]
+    [introSequencePhase, postSendStage, sceneMode]
   );
 
   const handleRefoldPointerMove = useCallback(
@@ -702,10 +795,17 @@ export function LightMessageLetterApp() {
 
   const handleWriteForMailbox = useCallback(
     (mailbox: MailboxNumber) => {
-      setSelectedMailbox(mailbox);
+      setSentMailbox(mailbox);
       returnToSendHome();
     },
     [returnToSendHome]
+  );
+
+  const handleMailboxTargetsMeasured = useCallback(
+    (targets: MailboxTargetScreenPoint[]) => {
+      sceneRef.current?.setMailboxScreenTargets(targets);
+    },
+    []
   );
 
   // Detect `?post=1..6` and populate client-local `dateStamp` safely after hydration
@@ -717,7 +817,7 @@ export function LightMessageLetterApp() {
       const params = new URLSearchParams(window.location.search);
       const parsed = parseMailboxParam(params.get("post"));
       if (parsed !== null) {
-        setSelectedMailbox(parsed);
+        setSentMailbox(parsed);
         setActivePost(parsed);
       } else {
         setActivePost(0);
@@ -753,40 +853,38 @@ export function LightMessageLetterApp() {
       const vpW = window.innerWidth;
       const isMobile = vpW < 640;
 
-      // Exact vertical budget guaranteeing 0px overlap between:
-      // [Top margin] -> [Scaled letter] -> [Leader gap] -> [30-CH strip plate] -> [Gap] -> [Confirm card]
-      const confirmCardReserve = isMobile ? 228 : 204;
-      const gapStripToCard = isMobile ? 16 : 20;
-      const stripHalfBottom = 34; // plateBottom extends ~32px below stripCenterY
-      const stripHalfTop = 34; // plateTop extends ~32px above stripCenterY
-      const gapLetterToStrip = isMobile ? 20 : 26;
-      const topSafeMargin = isMobile ? 12 : 18;
+      // Tight, cohesive vertical stack with crisp breathing space between UI 1 (30-CH plate)
+      // and UI 2 (CONFIRM // ARCHIVE card) and guaranteed zero border overlap:
+      const confirmCardH = isMobile ? 174 : 138;
+      const confirmCardBottomOffset = isMobile ? 12 : 16;
+      const confirmCardTop = vpH - confirmCardBottomOffset - confirmCardH;
+      const gapStripToCard = isMobile ? 18 : 18;
+      const stripHalfBottom = 46; // accommodates larger 13.5px CJK caption cleanly
+      const stripHalfTop = 34;
+      const gapLetterToStrip = isMobile ? 18 : 22;
+      const topSafeMargin = isMobile ? 14 : 20;
 
-      const totalBelowLetter =
-        gapLetterToStrip +
-        stripHalfTop +
-        stripHalfBottom +
-        gapStripToCard +
-        confirmCardReserve;
-
-      const availLetterH = Math.max(150, vpH - topSafeMargin - totalBelowLetter);
+      // Anchor UI 1 directly above UI 2 with a crisp tight gap (no dead black canyon!)
+      const stripCenterY = confirmCardTop - gapStripToCard - stripHalfBottom;
+      const stripTop = stripCenterY - stripHalfTop;
+      const maxLetterBottom = stripTop - gapLetterToStrip;
+      const availLetterH = Math.max(150, maxLetterBottom - topSafeMargin);
       const targetScale = Math.min(
-        0.72,
+        0.76,
         Math.max(0.34, availLetterH / Math.max(1, rect.height))
       );
       const scaledH = rect.height * targetScale;
 
-      const desiredTop =
-        topSafeMargin + Math.max(0, (availLetterH - scaledH) * 0.42);
+      // Place scaled letter cleanly right above UI 1
+      const desiredTop = Math.max(
+        topSafeMargin,
+        maxLetterBottom -
+          scaledH -
+          Math.min(12, Math.max(0, (availLetterH - scaledH) * 0.2))
+      );
       const desiredCenterY = desiredTop + scaledH * 0.5;
       const origCenterY = rect.top + rect.height * 0.5;
       const targetOffsetY = desiredCenterY - origCenterY;
-
-      const letterBottom = desiredTop + scaledH;
-      const maxStripCenterY =
-        vpH - confirmCardReserve - gapStripToCard - stripHalfBottom;
-      const idealStripCenterY = letterBottom + gapLetterToStrip + stripHalfTop;
-      const stripCenterY = Math.min(maxStripCenterY, idealStripCenterY);
 
       return { targetScale, targetOffsetY, stripCenterY };
     };
@@ -945,6 +1043,14 @@ export function LightMessageLetterApp() {
         window.clearTimeout(stageTimerRef.current);
         stageTimerRef.current = null;
       }
+      if (dissolveStepTimerRef.current !== null) {
+        window.clearTimeout(dissolveStepTimerRef.current);
+        dissolveStepTimerRef.current = null;
+      }
+      if (introReadTimerRef.current !== null) {
+        window.clearTimeout(introReadTimerRef.current);
+        introReadTimerRef.current = null;
+      }
       if (uploadToastTimerRef.current !== null) {
         window.clearTimeout(uploadToastTimerRef.current);
         uploadToastTimerRef.current = null;
@@ -1026,6 +1132,18 @@ export function LightMessageLetterApp() {
       window.clearTimeout(stageTimerRef.current);
       stageTimerRef.current = null;
     }
+    if (dissolveStepTimerRef.current !== null) {
+      window.clearTimeout(dissolveStepTimerRef.current);
+      dissolveStepTimerRef.current = null;
+    }
+    if (introReadTimerRef.current !== null) {
+      window.clearTimeout(introReadTimerRef.current);
+      introReadTimerRef.current = null;
+    }
+    sceneRef.current?.cancelIntroEraserAnimation();
+    if (introEraserIndicatorRef.current) {
+      introEraserIndicatorRef.current.style.opacity = "0";
+    }
 
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d", { willReadFrequently: true });
@@ -1051,11 +1169,17 @@ export function LightMessageLetterApp() {
     setSavedLetterJpg(null);
     setSamplingResult(null);
     setSwipeProgress(0);
+    setTargetedMailbox(null);
+    setLaunchedMailbox(null);
+    setIsEnvelopeSealed(false);
     setPostSendStage("idle");
     setIsBrushLabOpen(false);
     setShowDrawGuide(false);
     setIsRefoldDragging(false);
-    hasShownGuideOnceRef.current = false;
+    introSequencePhaseRef.current = "pending";
+    setIntroSequencePhase("pending");
+    setCelebrationCycleId(0);
+    setIsErasingIllustrations(false);
 
     if (paperVisualRef.current) {
       paperVisualRef.current.style.transform = "";
@@ -1075,7 +1199,14 @@ export function LightMessageLetterApp() {
   // =========================================================================
   const handleSendLetter = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || postSendStage !== "idle" || sceneMode !== "flat") return;
+    if (
+      !canvas ||
+      postSendStage !== "idle" ||
+      sceneMode !== "flat" ||
+      introSequencePhase !== "ready"
+    ) {
+      return;
+    }
 
     // Respect 30-second post-send cooldown
     if (cooldownRemainingSec > 0) return;
@@ -1127,6 +1258,7 @@ export function LightMessageLetterApp() {
     cooldownRemainingSec,
     dateStamp,
     hasStrokes,
+    introSequencePhase,
     postSendStage,
     sceneMode,
     strokeCount,
@@ -1150,20 +1282,28 @@ export function LightMessageLetterApp() {
       window.clearTimeout(stageTimerRef.current);
       stageTimerRef.current = null;
     }
+    if (dissolveStepTimerRef.current !== null) {
+      window.clearTimeout(dissolveStepTimerRef.current);
+      dissolveStepTimerRef.current = null;
+    }
     sparkleRef.current?.fadeOutAndClear(true);
     pendingWebpPromiseRef.current = null;
     setSamplingResult(null);
     setSavedLetterJpg(null);
+    setTargetedMailbox(null);
+    setLaunchedMailbox(null);
+    setIsEnvelopeSealed(false);
     setPostSendStage("idle");
   }, []);
 
   // =========================================================================
-  // STAGE 3 & STAGE 4 (SPARKLES, GLOW & RAYS START HERE AFTER SAVE CONFIRMATION):
-  // 1) Upload WebP (0.85) directly to Cloudflare R2 & save record to Supabase
-  // 2) Dissolve hand-drawn strokes into color-matched crayon starbursts + fade strip
-  // 3) 3D 65° Z-fold half-fold -> Left/Right pendulum showcase -> Press flat
-  //    -> Slide into 1px wireframe envelope & seal -> Pure vertical upward flight
-  // 4) After envelope exits -> brighten bg back to white & reset loop
+  // STAGE 3 & STAGE 4 (PRESERVED STROKES ON 3D FOLDING PAPER -> 6-MAILBOX SWIPE):
+  // 1) Bake user's hand-drawn strokes onto 3D letter texture (NEVER fade out!)
+  // 2) Fade out Quadtree overlay with subtle ambient golden sparkles
+  // 3) 3D 65° Z-fold -> Left/Right pendulum showcase -> Press flat -> Slide into
+  //    envelope pocket (strokes stay visible on paper throughout!) -> Seal
+  // 4) Step 5: Show 6 mailboxes at top; user swipes toward desired mailbox (1..6)
+  //    -> upload WebP to R2 for chosen mailbox & launch envelope directly into it!
   // =========================================================================
   const startStage3DissolveAndSend = useCallback(() => {
     const canvas = canvasRef.current;
@@ -1180,27 +1320,11 @@ export function LightMessageLetterApp() {
           }
         : null;
 
-    // 0. Kick off direct-to-R2 WebP upload & Supabase DB save in parallel with animation
-    const targetMailbox = selectedMailbox;
-    setSentMailbox(targetMailbox);
     setSwipeProgress(0);
-    const webpPromise = pendingWebpPromiseRef.current;
-    pendingWebpPromiseRef.current = null;
-    if (webpPromise) {
-      webpPromise
-        .then((blob) => runDirectR2Upload(blob, targetMailbox))
-        .catch((err) => {
-          console.error("Failed to generate WebP blob:", err);
-          setUploadStatus({
-            state: "error",
-            message:
-              err instanceof Error ? err.message : "圖片轉換為 WebP 失敗",
-            canRetry: false,
-          });
-        });
-    }
+    setTargetedMailbox(null);
+    setLaunchedMailbox(null);
 
-    // 1. Activate hand-drawn ambient stars & transform strokes into color-matched motifs
+    // 1. Activate subtle hand-drawn ambient stars & extract color palette from strokes
     sparkleRef.current?.setAmbientActive(true, normalizedRect);
 
     if (canvas && normalizedRect) {
@@ -1211,25 +1335,29 @@ export function LightMessageLetterApp() {
       dissolvePaletteRef.current = [];
     }
 
-    // Keep 3D letter clean blank stationery as the strokes lift off into stardust
-    sceneRef.current?.syncDrawingCanvas(null);
+    // 2. Keep ALL hand-drawn strokes solidly baked on the 3D letter paper (never fade out!)
+    sceneRef.current?.syncDrawingCanvas(canvas);
+    setIsEnvelopeSealed(false);
     setPostSendStage("dissolving");
 
     if (stageTimerRef.current !== null) {
       window.clearTimeout(stageTimerRef.current);
     }
+    if (dissolveStepTimerRef.current !== null) {
+      window.clearTimeout(dissolveStepTimerRef.current);
+      dissolveStepTimerRef.current = null;
+    }
 
-    // Wait for strokes & Quadtree overlay to dissolve before beginning 3D Z-fold showcase
+    // Brief beat for Quadtree overlay to clear cleanly before 3D Z-fold & envelope insertion
     stageTimerRef.current = window.setTimeout(() => {
-      // Stop outer perimeter ambient spawner so creases & envelope opening become the starlight source
+      stageTimerRef.current = null;
       sparkleRef.current?.setAmbientActive(false, null);
       setPostSendStage("enveloping");
 
       sceneRef.current?.startEnvelopeAndSend(
         () => {
-          // Stage 4.2: User swiped envelope straight up & it exited ->
-          // dissipate sparkles, brighten background to warm cotton paper,
-          // and slowly fade in pencil notice ("請到 N 號郵筒查看信件") for 5 seconds!
+          // Step 6: Envelope swooped into the chosen mailbox ->
+          // dissipate sparkles, transition into warm-white glow & show mailbox notice
           sparkleRef.current?.fadeOutAndClear(false);
           setPostSendStage("sent-notice");
         },
@@ -1240,21 +1368,49 @@ export function LightMessageLetterApp() {
           });
         },
         {
+          onEnvelopeSealed: () => {
+            // Smoothly fade out top status capsule the exact moment flap seals
+            setIsEnvelopeSealed(true);
+          },
           onReadyToSwipe: () => {
+            setIsEnvelopeSealed(true);
             setSwipeProgress(0);
+            setTargetedMailbox(null);
+            setLaunchedMailbox(null);
             setPostSendStage("awaiting-swipe");
           },
-          onSwipeProgress: (p) => {
+          onSwipeProgress: (p, targetMb) => {
             setSwipeProgress(p);
+            setTargetedMailbox(targetMb);
           },
-          onSwipeLaunched: () => {
+          onSwipeLaunched: (chosenMailbox) => {
+            setSentMailbox(chosenMailbox);
+            setLaunchedMailbox(chosenMailbox);
+            setTargetedMailbox(chosenMailbox);
             startSendCooldown();
             setPostSendStage("launching");
+
+            // Upload WebP directly to Cloudflare R2 & Supabase under the user's chosen mailbox (1..6)
+            const webpPromise = pendingWebpPromiseRef.current;
+            pendingWebpPromiseRef.current = null;
+            if (webpPromise) {
+              webpPromise
+                .then((blob) => runDirectR2Upload(blob, chosenMailbox))
+                .catch((err) => {
+                  console.error("Failed to generate WebP blob:", err);
+                  setUploadStatus({
+                    state: "error",
+                    message:
+                      err instanceof Error ? err.message : "圖片轉換為 WebP 失敗",
+                    canRetry: false,
+                  });
+                });
+            }
           },
         }
       );
-    }, 1020);
-  }, [paperTargetRect, runDirectR2Upload, selectedMailbox, startSendCooldown]);
+    }, 900);
+  }, [paperTargetRect, runDirectR2Upload, startSendCooldown]);
 
   // Stage 2 Action 1: Download full hand-drawn letter JPG -> immediately launch Stage 3
   const handleSaveAndProceedToEnvelope = useCallback(() => {
@@ -1274,7 +1430,8 @@ export function LightMessageLetterApp() {
     startStage3DissolveAndSend();
   }, [startStage3DissolveAndSend]);
 
-  const isFlatEditable = sceneMode === "flat" && postSendStage === "idle";
+  const isFlatMounted = sceneMode === "flat" && postSendStage === "idle";
+  const isFlatEditable = isFlatMounted && introSequencePhase === "ready";
   const isSamplingOverlayMounted =
     postSendStage === "sampling" ||
     postSendStage === "confirm-save" ||
@@ -1286,6 +1443,19 @@ export function LightMessageLetterApp() {
     postSendStage === "enveloping" ||
     postSendStage === "awaiting-swipe" ||
     postSendStage === "launching";
+  const isTopCapsuleMounted =
+    activePost === 0 &&
+    (postSendStage === "dissolving" ||
+      postSendStage === "enveloping" ||
+      postSendStage === "awaiting-swipe");
+  const isTopCapsuleVisible =
+    activePost === 0 &&
+    (postSendStage === "dissolving" ||
+      (postSendStage === "enveloping" && !isEnvelopeSealed));
+  const topCapsuleMessage =
+    postSendStage === "dissolving"
+      ? "正在將筆跡化為光訊⋯"
+      : "正在封存這則光的訊息⋯";
 
   return (
     <div
@@ -1393,22 +1563,16 @@ export function LightMessageLetterApp() {
       {/* 2D DRAWING OVERLAY + STAGE 1 SAMPLING + INTEGRATED BOTTOM BAR     */}
       {/* ================================================================= */}
       <div className="pointer-events-none relative z-20 flex h-full w-full flex-col items-center justify-between px-3 pt-3 pb-3 sm:px-6 sm:pt-4 sm:pb-5">
-        {/* Minimalist Top Bar (locks & fades cleanly during post-send choreography) */}
+        {/* Minimalist Top Bar (brush telemetry only; no redundant title above letter) */}
         <header
-          className={`flex w-full max-w-[680px] shrink-0 items-center justify-between gap-2 pb-2 transition-opacity duration-300 ${
+          className={`flex w-full max-w-[680px] shrink-0 items-center justify-end gap-2 pb-1.5 transition-opacity duration-400 ${
             isFlatEditable
               ? "pointer-events-auto opacity-100"
-              : "pointer-events-none opacity-0"
+              : isFlatMounted
+                ? "pointer-events-none opacity-65"
+                : "pointer-events-none opacity-0"
           }`}
         >
-          <div className="flex items-baseline gap-2">
-            <span className="text-sm font-normal tracking-[0.22em] text-[#222222]">
-              一則光的訊息
-            </span>
-            <span className="hidden font-mono text-[9.5px] tracking-[0.2em] text-[#8C8C8A] sm:inline">
-              A MESSAGE OF LIGHT
-            </span>
-          </div>
           <span className="font-mono text-[10px] tracking-[0.18em] text-[#8C8C8A]">
             {tool === "eraser"
               ? `ERASER · ${currentSize.eraserDiameter}px`
@@ -1425,6 +1589,14 @@ export function LightMessageLetterApp() {
               className="relative h-full w-full"
               style={{ transformOrigin: "center center" }}
             >
+              {/* Procedural Hand-Drawn Yanshui Festive Motifs & 100%-Open Firework Layer */}
+              <YanshuiPaperIllustration
+                isVisible={isFlatMounted}
+                celebrationTriggerId={celebrationCycleId}
+                isErasing={isErasingIllustrations}
+                isErased={introSequencePhase === "ready"}
+              />
+
               {/* Purely Transparent 2D Retina Drawing Canvas */}
               <canvas
                 ref={canvasRef}
@@ -1449,14 +1621,28 @@ export function LightMessageLetterApp() {
                 className={`relative z-10 block h-full w-full select-none ${
                   isFlatEditable ? "pointer-events-auto" : "pointer-events-none"
                 } ${tool === "eraser" ? "cursor-none" : "cursor-crosshair"} ${
-                  postSendStage === "dissolving"
-                    ? "transition-opacity duration-[920ms] ease-out"
-                    : isClearing
-                      ? "transition-opacity duration-200"
-                      : ""
+                  isClearing ? "transition-opacity duration-200" : ""
                 }`}
                 aria-label="一則光的訊息 手繪信紙畫布"
               />
+            </div>
+
+            {/* Auto-Eraser Translucent Head Indicator during 3.0s -> 4.2s intro decal sweep */}
+            <div
+              ref={introEraserIndicatorRef}
+              aria-hidden="true"
+              className="pointer-events-none absolute z-30 flex items-center justify-center rounded-full border border-dashed border-[#222222]/80 bg-[#FAF9F6]/65 text-[#222222]/70 shadow-[0_2px_10px_rgba(34,34,34,0.12)] backdrop-blur-[1px]"
+              style={{
+                width: "36px",
+                height: "36px",
+                left: "50%",
+                top: "50%",
+                opacity: 0,
+                transform: "translate(-50%, -50%)",
+                willChange: "left, top, opacity, transform",
+              }}
+            >
+              <EraserIcon size={14} />
             </div>
 
             {/* Eraser Dynamic Dashed-Circle Cursor Overlay */}
@@ -1507,28 +1693,12 @@ export function LightMessageLetterApp() {
               </div>
             )}
 
-            {/* Gentle Floating Guide Card after Unfolding */}
-            {isFlatEditable && showDrawGuide && !hasStrokes && (
-              <div className="pointer-events-none absolute inset-0 z-25 flex items-center justify-center px-5">
-                <div className="sketch-card animate-muji-modal-in pointer-events-auto flex max-w-[270px] flex-col items-center border border-[#222222] bg-[#FDFCF9]/95 px-5 py-4 text-center backdrop-blur-[2px]">
-                  <div className="sketch-pill flex h-8 w-8 items-center justify-center border border-[#222222]/30 bg-[#FAF9F6] text-[#222222]">
-                    <PenTipIcon size={15} />
-                  </div>
-                  <p className="mt-2.5 text-xs font-normal tracking-[0.2em] text-[#222222]">
-                    隨意留言或自由繪畫
-                  </p>
-                  <p className="mt-1.5 text-[10.5px] font-light leading-relaxed tracking-[0.08em] text-[#8C8C8A]">
-                    直接落筆即可在信紙上創作，下方可自由切換筆刷與顏色
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowDrawGuide(false)}
-                    className="sketch-pill mt-3 border border-[#222222] bg-white px-4 py-1 font-mono text-[10px] tracking-[0.16em] text-[#222222] transition-colors hover:bg-[#222222] hover:text-[#FAF9F6]"
-                  >
-                    開始書寫
-                  </button>
-                </div>
-              </div>
+            {/* Hand-written Pencil-on-Paper Creation Guide (replaces floating modal card) */}
+            {isFlatMounted && showDrawGuide && introSequencePhase === "guide" && (
+              <PaperPencilGuide
+                onBeginErasing={handleBeginGuideErasing}
+                onStartCreating={handleStartCreating}
+              />
             )}
 
             {/* Bottom-Center Small Circle Pull-Up-to-Re-fold Handle */}
@@ -1569,13 +1739,17 @@ export function LightMessageLetterApp() {
         </main>
 
         {/* =============================================================== */}
-        {/* INTEGRATED BOTTOM CONTROL BAR (locks & hides during send flow)  */}
+        {/* INTEGRATED BOTTOM CONTROL BAR (locks until "開始創作" clicked)   */}
         {/* =============================================================== */}
         <footer
-          className={`relative z-30 w-full max-w-[680px] shrink-0 transition-opacity duration-300 ${
+          aria-disabled={!isFlatEditable}
+          inert={!isFlatEditable || undefined}
+          className={`relative z-30 w-full max-w-[680px] shrink-0 transition-opacity duration-400 ${
             isFlatEditable
               ? "pointer-events-auto opacity-100"
-              : "pointer-events-none opacity-0"
+              : isFlatMounted
+                ? "pointer-events-none opacity-35"
+                : "pointer-events-none opacity-0"
           }`}
         >
           <BrushCustomizerPanel
@@ -1798,7 +1972,7 @@ export function LightMessageLetterApp() {
 
       {/* ================================================================= */}
       {/* STAGE 2: HAND-DRAWN PENCIL DRAFTING SAVE CONFIRMATION CARD        */}
-      {/* Symmetrically aligned with the 30-CH drafting plate above it      */}
+      {/* Mailbox selection (1..6) is now performed interactively on swipe! */}
       {/* ================================================================= */}
       {postSendStage === "confirm-save" && (
         <div
@@ -1812,52 +1986,15 @@ export function LightMessageLetterApp() {
               {/* Crisp top eyebrow metadata + clean centered single-line title */}
               <div className="flex w-full items-center justify-between font-mono text-[8.5px] tracking-[0.2em]">
                 <span className="text-[#F3D98B]/60">CONFIRM // ARCHIVE</span>
-                <span className="text-[#F3D98B]">POST #{selectedMailbox}</span>
+                <span className="text-[#F3D98B]">30-CH LIGHT DATA READY</span>
               </div>
 
-              <h2 className="mt-1 whitespace-nowrap text-center text-[13.5px] font-normal tracking-[0.22em] text-[#FAF9F6] sm:text-sm">
+              <h2 className="mt-1.5 whitespace-nowrap text-center text-[13.5px] font-normal tracking-[0.22em] text-[#FAF9F6] sm:text-sm">
                 是否要儲存這張信紙？
               </h2>
 
-              {/* Mailbox Selector (1 ~ 6) */}
-              <div className="mt-2.5 w-full border-y border-dashed border-[#F3D98B]/22 py-2.5">
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-[10.5px] font-light tracking-[0.18em] text-[#D8D8D2]">
-                    選擇投遞郵筒
-                  </span>
-                  <span className="font-mono text-[8.5px] tracking-[0.16em] text-[#FAF9F6]/45">
-                    MAILBOX 01–06
-                  </span>
-                </div>
-                <div
-                  role="group"
-                  aria-label="選擇 1 到 6 號郵筒"
-                  className="grid w-full grid-cols-6 gap-1.5 sm:gap-2"
-                >
-                  {MAILBOX_NUMBERS.map((num) => {
-                    const active = selectedMailbox === num;
-                    return (
-                      <button
-                        key={num}
-                        type="button"
-                        onClick={() => setSelectedMailbox(num)}
-                        aria-pressed={active}
-                        aria-label={`郵筒 ${num}`}
-                        className={`sketch-pill-dark flex h-7.5 w-full items-center justify-center border font-mono text-xs transition-all duration-200 active:scale-95 ${
-                          active
-                            ? "border-[#F3D98B] bg-[#F3D98B] font-medium text-[#141416]"
-                            : "border-[#FAF9F6]/28 bg-transparent text-[#FAF9F6]/80 hover:border-[#F3D98B]/75 hover:text-[#FAF9F6]"
-                        }`}
-                      >
-                        {num}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
               {/* Three Action Buttons: cleanly proportioned & symmetrically padded */}
-              <div className="mt-2.5 grid w-full grid-cols-2 gap-2 sm:grid-cols-3">
+              <div className="mt-3 grid w-full grid-cols-2 gap-2 border-t border-dashed border-[#F3D98B]/22 pt-3 sm:grid-cols-3">
                 <button
                   type="button"
                   onClick={handleSaveAndProceedToEnvelope}
@@ -1909,12 +2046,16 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* STAGE 3.5: INTERACTIVE SWIPE-UP-TO-SEND HAND-DRAWN GUIDE UI       */}
+      {/* STEP 5: 6-MAILBOX TOP TARGET ROW + DIRECTIONAL SWIPE-UP LAUNCH    */}
+      {/* Stays visible during launching so the envelope visibly flies in!  */}
       {/* ================================================================= */}
-      {postSendStage === "awaiting-swipe" && (
+      {(postSendStage === "awaiting-swipe" || postSendStage === "launching") && (
         <SwipeUpSendGuide
           swipeProgress={swipeProgress}
-          mailbox={sentMailbox}
+          targetedMailbox={targetedMailbox}
+          isLaunching={postSendStage === "launching"}
+          launchedMailbox={launchedMailbox}
+          onTargetsMeasured={handleMailboxTargetsMeasured}
         />
       )}
 
@@ -1929,78 +2070,60 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* DIRECT-TO-R2 UPLOAD STATUS TOAST (UPLOADING / SUCCESS / ERROR)    */}
+      {/* STEP 3 & STEP 4: TOP STATUS CAPSULE (FADES TO OPACITY 0 ON SEAL)  */}
       {/* ================================================================= */}
-      {uploadStatus.state !== "idle" &&
+      {isTopCapsuleMounted && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none fixed inset-x-0 top-5 z-50 flex justify-center px-4 transition-all duration-300 ease-out sm:top-6 ${
+            isTopCapsuleVisible
+              ? "translate-y-0 opacity-100"
+              : "-translate-y-1.5 opacity-0"
+          }`}
+        >
+          <div className="sketch-pill-dark flex max-w-[92vw] items-center gap-2.5 border border-[#F3D98B]/45 bg-[#121216]/92 px-4 py-1.5 text-xs font-light tracking-[0.16em] text-[#FAF9F6] backdrop-blur-[4px]">
+            <span
+              aria-hidden="true"
+              className="animate-dot-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[#F3D98B]"
+            />
+            <span className="whitespace-nowrap">{topCapsuleMessage}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ================================================================= */}
+      {/* DIRECT-TO-R2 UPLOAD ERROR RECOVERY TOAST (ONLY OUTSIDE SEND FLOW) */}
+      {/* ================================================================= */}
+      {uploadStatus.state === "error" &&
         activePost === 0 &&
-        (postSendStage !== "sent-notice" || uploadStatus.state === "error") && (
+        (postSendStage === "idle" || postSendStage === "sent-notice") && (
         <div
           role="status"
           aria-live="polite"
           className="pointer-events-none fixed inset-x-0 top-4 z-50 flex justify-center px-3 sm:top-5"
         >
-          <div
-            className={`animate-muji-modal-in pointer-events-auto flex max-w-[94vw] flex-wrap items-center justify-center gap-2 border px-3.5 py-2 text-xs transition-colors duration-300 ${
-              isDarkAtmosphere
-                ? "sketch-card-dark border-[#FAF9F6]/70 bg-[#121215]/95 text-[#FAF9F6]"
-                : "sketch-card border-[#222222] bg-[#FDFCF9]/95 text-[#222222]"
-            }`}
-          >
-            {uploadStatus.state === "uploading" && (
-              <>
-                <span className="h-3 w-3 shrink-0 animate-spin rounded-full border border-current border-t-transparent" />
-                <span className="tracking-[0.12em]">
-                  {uploadStatus.phase === "requesting-url"
-                    ? `正在準備郵筒 #${uploadStatus.mailbox} 上傳連結…`
-                    : uploadStatus.phase === "uploading-r2"
-                      ? `正在直傳 WebP 至郵筒 #${uploadStatus.mailbox}…`
-                      : `正在收錄至郵筒 #${uploadStatus.mailbox}…`}
-                </span>
-              </>
+          <div className="sketch-card animate-muji-modal-in pointer-events-auto flex max-w-[94vw] flex-wrap items-center justify-center gap-2 border border-[#222222] bg-[#FDFCF9]/95 px-3.5 py-2 text-xs text-[#222222]">
+            <span className="max-w-[210px] truncate tracking-[0.08em] text-[#DF7A5E] sm:max-w-[300px]">
+              上傳失敗：{uploadStatus.message}
+            </span>
+            {uploadStatus.canRetry && (
+              <button
+                type="button"
+                onClick={handleRetryUpload}
+                className="shrink-0 rounded-full border border-[#222222] px-2.5 py-0.5 text-[10.5px] tracking-[0.12em] text-[#222222] transition-colors hover:bg-[#222222] hover:text-[#FAF9F6]"
+              >
+                重試
+              </button>
             )}
-
-            {uploadStatus.state === "success" && (
-              <>
-                <span
-                  aria-hidden="true"
-                  className={`inline-block h-2 w-2 shrink-0 rounded-full ${
-                    isDarkAtmosphere ? "bg-[#F3D98B]" : "bg-[#222222]"
-                  }`}
-                />
-                <span className="tracking-[0.12em]">
-                  已成功投入郵筒 #{uploadStatus.mailbox}
-                </span>
-              </>
-            )}
-
-            {uploadStatus.state === "error" && (
-              <>
-                <span className="max-w-[210px] truncate tracking-[0.08em] text-[#DF7A5E] sm:max-w-[300px]">
-                  上傳失敗：{uploadStatus.message}
-                </span>
-                {uploadStatus.canRetry && (
-                  <button
-                    type="button"
-                    onClick={handleRetryUpload}
-                    className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[10.5px] tracking-[0.12em] transition-colors ${
-                      isDarkAtmosphere
-                        ? "border-[#FAF9F6]/75 text-[#FAF9F6] hover:bg-[#FAF9F6] hover:text-[#121215]"
-                        : "border-[#222222] text-[#222222] hover:bg-[#222222] hover:text-[#FAF9F6]"
-                    }`}
-                  >
-                    重試
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setUploadStatus({ state: "idle" })}
-                  aria-label="關閉錯誤提示"
-                  className="ml-0.5 shrink-0 opacity-65 transition-opacity hover:opacity-100"
-                >
-                  ✕
-                </button>
-              </>
-            )}
+            <button
+              type="button"
+              onClick={() => setUploadStatus({ state: "idle" })}
+              aria-label="關閉錯誤提示"
+              className="ml-0.5 shrink-0 opacity-65 transition-opacity hover:opacity-100"
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}

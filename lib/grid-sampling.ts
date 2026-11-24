@@ -546,7 +546,7 @@ export function computeStripGeometry(
   const topY = centerY - blockH / 2;
   const rulePad = Math.max(5, blockH * 0.28);
   const plateTop = topY - rulePad - 17;
-  const plateBottom = topY + blockH + rulePad + 16;
+  const plateBottom = topY + blockH + rulePad + 29;
 
   return {
     stripX,
@@ -579,7 +579,9 @@ export function drawIndustrialSketch30Strip(
   revealCountFloat = LED_CHANNEL_COUNT,
   stripAlpha = 1,
   boilStep = 0,
-  theme: "dark-cardstock" | "light-paper" = "dark-cardstock"
+  theme: "dark-cardstock" | "light-paper" = "dark-cardstock",
+  subtitleText = "正在為畫作生成光的數據⋯",
+  subtitlePulseAlpha = 1
 ): StripLayoutGeometry {
   const geom = computeStripGeometry(centerX, centerY, stripW, blockH);
   if (stripAlpha <= 0.005 || revealCountFloat <= 0) return geom;
@@ -587,7 +589,7 @@ export function drawIndustrialSketch30Strip(
   const { stripX, topY, blockW, gap } = geom;
   const rulePad = Math.max(5, blockH * 0.26);
   const fontSize = Math.max(8, Math.min(10.5, stripW * 0.022));
-  const subFont = Math.max(7, Math.min(8.5, stripW * 0.017));
+  const subFont = Math.max(12.5, Math.min(14.5, stripW * 0.036));
   const labelGap = Math.max(3, fontSize * 0.35);
 
   // Subtle 3-frame hand-drawn boiling rhythm
@@ -605,7 +607,7 @@ export function drawIndustrialSketch30Strip(
     : "rgba(34, 34, 34, 0.20)";
   const labelColor = isDark ? "rgba(250, 249, 246, 0.72)" : "#6E6D6A";
   const accentLabelColor = isDark ? "#F3D98B" : "#222222";
-  const subLabelColor = isDark ? "rgba(243, 217, 139, 0.62)" : "#8C8C8A";
+  const subLabelColor = isDark ? "#F7E5AE" : "#2B2A28";
 
   ctx.save();
   ctx.globalAlpha = stripAlpha;
@@ -766,16 +768,24 @@ export function drawIndustrialSketch30Strip(
     }
   }
 
-  // Bottom tiny calibration note
+  // Bottom prominent light-data explanation caption
+  ctx.save();
+  ctx.globalAlpha = stripAlpha * Math.max(0.68, Math.min(1, subtitlePulseAlpha));
   ctx.textBaseline = "top";
   ctx.textAlign = "center";
   ctx.fillStyle = subLabelColor;
-  ctx.font = `400 ${subFont}px "IBM Plex Mono", ui-monospace, monospace`;
+  const subFontStack =
+    typeof window !== "undefined"
+      ? `${window.getComputedStyle(document.body).fontFamily}, "IBM Plex Mono", sans-serif`
+      : '"Noto Sans TC", "IBM Plex Mono", sans-serif';
+  ctx.font = `500 ${subFont.toFixed(1)}px ${subFontStack}`;
   ctx.fillText(
-    "STROKE COMPLEXITY INDEX [000–255] // LINKED TO QUADTREE NODES",
+    subtitleText,
     centerX,
-    topY + blockH + rulePad + Math.max(4, subFont * 0.45)
+    topY + blockH + rulePad + Math.max(6, subFont * 0.48),
+    plateW - 14
   );
+  ctx.restore();
 
   ctx.restore();
   return geom;

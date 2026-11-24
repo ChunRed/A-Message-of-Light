@@ -323,6 +323,12 @@ export function GridSamplingOverlay({
       // =====================================================================
       // 2. INDUSTRIAL-DESIGN SKETCH 30-CH STRIP (CLEANLY BELOW THE LETTER!)
       // =====================================================================
+      const subtitlePulse = finished
+        ? 1
+        : 0.72 + 0.28 * Math.sin(elapsed * 0.0055);
+      const subtitleCopy = finished
+        ? "已為畫作生成 30 道光的數據"
+        : "正在為畫作生成 30 道光的數據⋯";
       const stripGeom = drawIndustrialSketch30Strip(
         ctx,
         ledValues,
@@ -333,7 +339,9 @@ export function GridSamplingOverlay({
         revealCount,
         stripRevealP > 0 ? 1 : 0,
         boilStep,
-        "dark-cardstock"
+        "dark-cardstock",
+        subtitleCopy,
+        subtitlePulse
       );
 
       // =====================================================================
