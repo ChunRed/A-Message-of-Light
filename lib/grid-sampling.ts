@@ -353,8 +353,11 @@ export function sampleDrawingToGridAnd30Led(
     0
   );
 
-  // 4. Derive 30 LED values [0..255] + feature anchor links from Quadtree detail richness
+  // 4. Derive HIGH-CONTRAST 30 LED values [0..255] + feature anchor links
+  // Combines exact narrow-slice pixel ink/edge energy + fine Quadtree detail
+  // (never smeared by coarse wide cells) followed by adaptive contrast expansion!
   const rawChannelScores = new Array<number>(LED_CHANNEL_COUNT).fill(0);
+  const sliceHasInk = new Array<boolean>(LED_CHANNEL_COUNT).fill(false);
   const chosenLeafPerChannel: (QuadtreeNode | null)[] = new Array(
     LED_CHANNEL_COUNT
   ).fill(null);
@@ -369,53 +372,91 @@ export function sampleDrawingToGridAnd30Led(
     const bandCenterX = (bandX0 + bandX1) * 0.5;
     const bandWidth = bandX1 - bandX0;
 
-    // Collect Quadtree leaves overlapping this channel's horizontal slice
+    // A. Measure exact narrow vertical-column pixel ink & edge energy directly
+    const sx0 = Math.max(0, Math.floor(ax0 + (ch / LED_CHANNEL_COUNT) * agW));
+    const sx1 = Math.min(
+      aW,
+      Math.max(sx0 + 1, Math.ceil(ax0 + ((ch + 1) / LED_CHANNEL_COUNT) * agW))
+    );
+    const sy0 = ay0;
+    const sy1 = Math.min(aH, ay0 + agH);
+
+    let sliceInkSum = 0;
+    let sliceEdgeSum = 0;
+    let sliceActivePx = 0;
+    let slicePxCount = 0;
+    let peakBandEnergy = 0;
+
+    // Track 12 vertical micro-bands inside this slice to reward dense stroke clusters
+    const vBands = 12;
+    const vBandH = Math.max(1, (sy1 - sy0) / vBands);
+    for (let vb = 0; vb < vBands; vb++) {
+      const by0 = Math.floor(sy0 + vb * vBandH);
+      const by1 = Math.min(sy1, Math.ceil(sy0 + (vb + 1) * vBandH));
+      let bSum = 0;
+      let bCnt = 0;
+      for (let y = by0; y < by1; y++) {
+        const rowOff = y * aW;
+        for (let x = sx0; x < sx1; x++) {
+          const idx = rowOff + x;
+          const iv = ink[idx];
+          const ev = edge[idx];
+          sliceInkSum += iv;
+          sliceEdgeSum += ev;
+          if (iv > 0.035) sliceActivePx += 1;
+          slicePxCount += 1;
+          bSum += iv * 0.75 + ev * 1.25;
+          bCnt += 1;
+        }
+      }
+      if (bCnt > 0) {
+        const bAvg = bSum / bCnt;
+        if (bAvg > peakBandEnergy) peakBandEnergy = bAvg;
+      }
+    }
+
+    // Collect Quadtree leaves overlapping this narrow slice
     const overlapping = quadtreeLeaves.filter(
       (lf) => lf.hasInk && lf.nx + lf.nw > bandX0 && lf.nx < bandX1
     );
 
-    if (overlapping.length === 0) {
+    if (sliceActivePx < 2 || overlapping.length === 0) {
       rawChannelScores[ch] = 0;
+      sliceHasInk[ch] = false;
       chosenLeafPerChannel[ch] = null;
       continue;
     }
 
-    // Aggregate quadtree detail richness inside this slice:
-    // - Subdivision count (more fine leaves = richer stroke complexity)
-    // - Depth-weighted edge & variance energy
-    let weightedDetailSum = 0;
-    let weightTotal = 0;
-    let peakDepth = 0;
-    let peakLeafDetail = 0;
+    sliceHasInk[ch] = true;
+    const safeSlicePx = Math.max(1, slicePxCount);
+    const sliceInkDensity = sliceInkSum / safeSlicePx;
+    const sliceEdgeDensity = sliceEdgeSum / safeSlicePx;
 
+    // B. Add ONLY fine-subdivision Quadtree richness (depth >= 2) weighted by true narrow overlap
+    let fineLeafSum = 0;
+    let fineWeight = 0;
     for (const lf of overlapping) {
+      if (lf.depth < 2) continue;
       const ovLeft = Math.max(lf.nx, bandX0);
       const ovRight = Math.min(lf.nx + lf.nw, bandX1);
-      const overlapFrac = Math.max(0.05, (ovRight - ovLeft) / Math.max(1e-5, bandWidth));
-      const depthBoost = 0.45 + (lf.depth / QUADTREE_MAX_DEPTH) * 1.15;
-      const leafRichness =
-        (lf.detailScore * 0.65 + lf.edgeEnergy * 1.1 + lf.inkMean * 0.45) *
-        depthBoost;
-
-      weightedDetailSum += leafRichness * overlapFrac;
-      weightTotal += overlapFrac;
-      if (lf.depth > peakDepth) peakDepth = lf.depth;
-      if (leafRichness > peakLeafDetail) peakLeafDetail = leafRichness;
+      const overlapFrac = Math.max(0.02, (ovRight - ovLeft) / Math.max(1e-5, bandWidth));
+      const depthWeight = Math.pow(lf.depth / QUADTREE_MAX_DEPTH, 1.6);
+      fineLeafSum += (lf.edgeEnergy * 1.15 + lf.detailScore * 0.85) * depthWeight * overlapFrac;
+      fineWeight += overlapFrac;
     }
+    const fineQuadtreeEnergy = fineWeight > 0 ? fineLeafSum / fineWeight : 0;
 
-    const leafDensityFactor = Math.min(1.4, Math.sqrt(overlapping.length) * 0.38);
-    const avgDetail = weightTotal > 0 ? weightedDetailSum / weightTotal : 0;
+    // High-feature combined score strongly anchored to local column density & edge clusters
     const combinedScore =
-      avgDetail * 0.45 +
-      peakLeafDetail * 0.35 +
-      (peakDepth / QUADTREE_MAX_DEPTH) * 0.32 +
-      leafDensityFactor * 0.25;
+      sliceInkDensity * 2.2 +
+      sliceEdgeDensity * 3.1 +
+      peakBandEnergy * 0.95 +
+      fineQuadtreeEnergy * 0.55;
 
     rawChannelScores[ch] = combinedScore;
     if (combinedScore > maxRawScore) maxRawScore = combinedScore;
 
     // Pick the single best feature leaf for this channel's leader line
-    // Prefer high-depth high-detail leaves whose center is closest to bandCenterX & not yet linked
     let bestLeaf: QuadtreeNode | null = null;
     let bestPickScore = -Infinity;
 
@@ -441,7 +482,18 @@ export function sampleDrawingToGridAnd30Led(
     }
   }
 
-  const effectiveCeil = Math.max(maxRawScore, 0.48);
+  // Adaptive min-max contrast stretch across non-empty channels so bright focal peaks
+  // blaze near 255 while sparse/light columns drop cleanly into deep lows (0..40)!
+  const nonZeroScores = rawChannelScores
+    .filter((v) => v > 0.002)
+    .sort((a, b) => a - b);
+  const lowBaseline =
+    nonZeroScores.length >= 6
+      ? nonZeroScores[Math.floor(nonZeroScores.length * 0.14)] * 0.72
+      : 0;
+  const effectiveCeil = Math.max(maxRawScore, lowBaseline + 0.08);
+  const span = Math.max(1e-5, effectiveCeil - lowBaseline);
+
   const ledValues: number[] = [];
   const channelLinks: QuadtreeChannelLink[] = [];
 
@@ -449,7 +501,7 @@ export function sampleDrawingToGridAnd30Led(
     const raw = rawChannelScores[ch];
     const leaf = chosenLeafPerChannel[ch];
 
-    if (!leaf || raw <= 0.005 || maxRawScore <= 0.005) {
+    if (!sliceHasInk[ch] || !leaf || raw <= 0.002 || maxRawScore <= 0.002) {
       ledValues.push(0);
       channelLinks.push({
         channelIndex: ch,
@@ -465,15 +517,19 @@ export function sampleDrawingToGridAnd30Led(
       continue;
     }
 
-    const norm = Math.min(1, raw / effectiveCeil);
-    const perceptual = Math.pow(norm, 0.82);
-    const value = Math.max(18, Math.min(255, Math.round(perceptual * 255)));
+    const stretched = Math.max(0, Math.min(1, (raw - lowBaseline) / span));
+    // High-contrast gamma expansion (> 1 expands peaks & deepens valleys!)
+    const highContrast = Math.pow(stretched, 1.85);
+    const value =
+      highContrast < 0.045
+        ? 0
+        : Math.min(255, Math.round(highContrast * 255));
 
     ledValues.push(value);
     channelLinks.push({
       channelIndex: ch,
       value,
-      hasFeature: true,
+      hasFeature: value > 0,
       anchorNx: leaf.nx + leaf.nw * 0.5,
       anchorNy: leaf.ny + leaf.nh * 0.5,
       leafId: leaf.id,

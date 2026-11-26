@@ -401,61 +401,7 @@ function drawCrayonFilledPolygon(
 }
 
 /**
- * Draws a charming back-and-forth scribbled wax-crayon color swatch patch
- * (directly inspired by Reference Image 3 & 4's airy colored crayon patches!).
- */
-function drawCrayonRubbedPatch(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  width: number,
-  height: number,
-  angleRad: number,
-  colorHex: string,
-  reveal: number,
-  rng: () => number,
-  unit: number,
-  alpha = 0.9
-): void {
-  const p = clamp01(reveal);
-  if (p <= 0.02 || width < 2 || height < 2) return;
-
-  const strokes = Math.max(3, Math.min(7, Math.round(height / (3.4 * unit))));
-  const pts: Pt2[] = [];
-  const hw = width * 0.5;
-  const hh = height * 0.5;
-  const cos = Math.cos(angleRad);
-  const sin = Math.sin(angleRad);
-
-  for (let i = 0; i < strokes; i++) {
-    const f = strokes === 1 ? 0.5 : i / (strokes - 1);
-    const ly = -hh + f * height + (rng() - 0.5) * 1.4 * unit;
-    const xL = -hw + (rng() - 0.5) * 3.2 * unit;
-    const xR = hw + (rng() - 0.5) * 3.2 * unit;
-    const lx0 = i % 2 === 0 ? xL : xR;
-    const lx1 = i % 2 === 0 ? xR : xL;
-    pts.push({
-      x: cx + lx0 * cos - ly * sin,
-      y: cy + lx0 * sin + ly * cos,
-    });
-    pts.push({
-      x: cx + lx1 * cos - ly * sin,
-      y: cy + lx1 * sin + ly * cos,
-    });
-  }
-
-  drawCrayonStroke(ctx, pts, p, colorHex, rng, {
-    lineWidth: Math.max(2.6, (height / strokes) * 1.15),
-    alpha,
-    jitterAmp: 0.9 * unit,
-    density: "rich",
-    passes: 2,
-    brokenChance: 0.03,
-  });
-}
-
-/**
- * Draws a playful airy curly wax-crayon loop ribbon (Reference Image 3 style!).
+ * Draws a playful airy curly wax-crayon loop ribbon.
  */
 function drawCrayonCurlyLoop(
   ctx: CanvasRenderingContext2D,
@@ -602,19 +548,6 @@ function drawOctagonalBuildingCrayon(
   const bw = w * 0.215;
   const bh = h * 0.15;
 
-  // Ground crayon pencil-rub shadow line (Reference Image 1!)
-  drawCrayonStroke(
-    ctx,
-    [
-      { x: cx - bw * 0.62, y: baseY + 3.5 * unit },
-      { x: cx + bw * 0.68, y: baseY + 3.0 * unit },
-    ],
-    easeOutCubic(clamp01(p / 0.45)),
-    YANSHUI_PALETTE.sageRoof,
-    rng,
-    { lineWidth: 3.0 * unit, alpha: 0.72, jitterAmp: 0.8 * unit, density: "medium" }
-  );
-
   // 1. Slender earthy-brown wax-crayon tree standing beside 八角樓 (Ref 1!)
   const treeP = easeOutCubic(clamp01((p - 0.05) / 0.6));
   if (treeP > 0.02) {
@@ -716,19 +649,6 @@ function drawOctagonalBuildingCrayon(
       rng,
       unit,
       { density: "rich", rubAngleDeg: 84, edgeWidth: 2.4 }
-    );
-
-    // Cream chalky corner highlight edge (signature hand-colored detail from Ref 1!)
-    drawCrayonStroke(
-      ctx,
-      [
-        { x: cx - f1HW * 0.42, y: f1Top + 2 * unit },
-        { x: cx - f1HW * 0.42, y: baseY - 1 * unit },
-      ],
-      f1P,
-      YANSHUI_PALETTE.cream,
-      rng,
-      { lineWidth: 2.0 * unit, alpha: 0.72, jitterAmp: 0.5 * unit, passes: 1 }
     );
 
     // Warm olive-umber wooden double doorway with mustard-ochre trim (Ref 1!)
@@ -1041,65 +961,40 @@ function drawShuiyueBridgeCrayon(
   const midX = (leftX + rightX) * 0.5;
   const archPeakY = h * 0.728;
 
-  // 1. Airy Ref-3-style horizontal back-and-forth crayon water swatches (NOT heavy full-bleed!)
+  // 1. Gentle organic rippling Yuejin harbor water waves beneath 水月橋 (zero straight bars!)
   const waterP = easeOutCubic(clamp01(p / 0.58));
   if (waterP > 0.02) {
-    drawCrayonRubbedPatch(
-      ctx,
-      w * 0.24,
-      waterY + h * 0.018,
-      w * 0.16,
-      h * 0.024,
-      -0.04,
-      YANSHUI_PALETTE.skyBlue,
-      waterP,
-      rng,
-      unit,
-      0.78
-    );
-    drawCrayonRubbedPatch(
-      ctx,
-      w * 0.46,
-      waterY + h * 0.028,
-      w * 0.18,
-      h * 0.022,
-      0.03,
-      YANSHUI_PALETTE.mint,
-      clamp01((waterP - 0.1) / 0.9),
-      rng,
-      unit,
-      0.76
-    );
-    drawCrayonRubbedPatch(
-      ctx,
-      w * 0.35,
-      waterY + h * 0.048,
-      w * 0.14,
-      h * 0.016,
-      -0.02,
-      YANSHUI_PALETTE.skyBlue,
-      clamp01((waterP - 0.18) / 0.82),
-      rng,
-      unit,
-      0.72
-    );
-
-    // Playful Ref 3 sky-blue curly water wave scribble drifting underneath
-    drawCrayonCurlyLoop(
-      ctx,
-      w * 0.18,
-      waterY + h * 0.042,
-      w * 0.54,
-      waterY + h * 0.046,
-      3.5,
-      4.0 * unit,
-      clamp01((waterP - 0.2) / 0.8),
-      YANSHUI_PALETTE.skyBlue,
-      rng,
-      unit,
-      0.8,
-      1.9
-    );
+    const waveConfigs = [
+      { x0: w * 0.14, y: waterY + h * 0.018, len: w * 0.42, col: YANSHUI_PALETTE.skyBlue, ph: 0.4 },
+      { x0: w * 0.21, y: waterY + h * 0.036, len: w * 0.32, col: YANSHUI_PALETTE.mint, ph: 1.9 },
+      { x0: w * 0.18, y: waterY + h * 0.052, len: w * 0.28, col: YANSHUI_PALETTE.skyBlue, ph: 3.1 },
+    ];
+    for (let i = 0; i < waveConfigs.length; i++) {
+      const wc = waveConfigs[i];
+      const wPts = sampleWaveLine(
+        wc.x0,
+        wc.y,
+        wc.len,
+        2.6 * unit,
+        3.2,
+        wc.ph + elapsedSec * 0.65,
+        20
+      );
+      drawCrayonStroke(
+        ctx,
+        wPts,
+        clamp01((waterP - i * 0.1) / 0.8),
+        wc.col,
+        rng,
+        {
+          lineWidth: 2.3 * unit,
+          alpha: 0.8 - i * 0.08,
+          jitterAmp: 0.55 * unit,
+          density: "medium",
+          passes: 1,
+        }
+      );
+    }
   }
 
   // 2. Warm marigold wax-crayon "Water-Moon" (水月) nested poetically under the arch
@@ -1121,23 +1016,22 @@ function drawShuiyueBridgeCrayon(
       unit,
       "rich"
     );
-    // Shimmering marigold crayon reflection dashes rippling below waterY
-    for (let row = 0; row < 3; row++) {
-      const sway = Math.sin(elapsedSec * 1.4 + row * 1.2) * 2.8 * unit;
-      const ry = waterY + (5.5 + row * 5.2) * unit;
-      const halfL = moonR * (1.25 - row * 0.25);
-      drawCrayonStroke(
-        ctx,
-        [
-          { x: moonX - halfL + sway, y: ry },
-          { x: moonX + halfL + sway, y: ry },
-        ],
-        moonP,
-        row === 0 ? YANSHUI_PALETTE.lemon : YANSHUI_PALETTE.marigold,
-        rng,
-        { lineWidth: 2.5 * unit, alpha: 0.88 - row * 0.14, jitterAmp: 0.6 * unit }
-      );
-    }
+    // Gentle wavy moon reflection shimmer on the water
+    const moonWave = sampleWaveLine(
+      moonX - moonR * 1.15,
+      waterY + 7 * unit,
+      moonR * 2.3,
+      2.1 * unit,
+      2.0,
+      elapsedSec * 1.1,
+      12
+    );
+    drawCrayonStroke(ctx, moonWave, moonP, YANSHUI_PALETTE.marigold, rng, {
+      lineWidth: 2.2 * unit,
+      alpha: 0.82,
+      jitterAmp: 0.5 * unit,
+      passes: 1,
+    });
   }
 
   // 3. Curved Wax-Crayon 水月橋 Arch Span & Hand-Sketched Wooden Railings
@@ -1232,32 +1126,6 @@ function drawShuiyueBridgeCrayon(
           rng,
           unit
         );
-      }
-    }
-
-    // Two tiny airy reed/grass crayon tufts framing bridge banks (Ref 3 touch!)
-    const tuftP = clamp01((archP - 0.35) / 0.65);
-    if (tuftP > 0.05) {
-      for (const side of [
-        { x: leftX - 4 * unit, dir: -1 },
-        { x: rightX + 4 * unit, dir: 1 },
-      ]) {
-        for (let b = 0; b < 3; b++) {
-          drawCrayonStroke(
-            ctx,
-            [
-              { x: side.x, y: waterY + 2 * unit },
-              {
-                x: side.x + side.dir * (4 + b * 4.5) * unit,
-                y: waterY - (10 + (b % 2) * 5) * unit,
-              },
-            ],
-            tuftP,
-            YANSHUI_PALETTE.leafGreen,
-            rng,
-            { lineWidth: 1.8 * unit, alpha: 0.86, jitterAmp: 0.45 * unit, passes: 1 }
-          );
-        }
       }
     }
   }
@@ -1575,23 +1443,6 @@ export function drawYanshuiPerimeterMotifs(
         { density: "rich", edgeWidth: 1.6 }
       );
     }
-
-    // Playful airy Ref-3 coral crayon loop floating gently near upper center-left
-    drawCrayonCurlyLoop(
-      ctx,
-      w * 0.43,
-      h * 0.13,
-      w * 0.59,
-      h * 0.125,
-      3.2,
-      3.6 * unit,
-      clamp01((leftFireworkP - 0.35) / 0.65),
-      YANSHUI_PALETTE.coralPink,
-      rng,
-      unit,
-      0.78,
-      1.8
-    );
   }
 
   // =========================================================================
@@ -1643,37 +1494,6 @@ export function drawYanshuiPerimeterMotifs(
       unit,
       elapsedSec + 2.4
     );
-
-    // 2 airy Ref-3 crayon color swatches accenting the lower-right corner cleanly
-    const swatchP = clamp01((rightFireworkP - 0.3) / 0.7);
-    if (swatchP > 0.05) {
-      drawCrayonRubbedPatch(
-        ctx,
-        w * 0.885,
-        h * 0.855,
-        w * 0.068,
-        h * 0.018,
-        -0.24,
-        YANSHUI_PALETTE.marigold,
-        swatchP,
-        rng,
-        unit,
-        0.82
-      );
-      drawCrayonRubbedPatch(
-        ctx,
-        w * 0.85,
-        h * 0.905,
-        w * 0.062,
-        h * 0.015,
-        0.16,
-        YANSHUI_PALETTE.skyBlue,
-        swatchP,
-        rng,
-        unit,
-        0.8
-      );
-    }
   }
 
   ctx.restore();

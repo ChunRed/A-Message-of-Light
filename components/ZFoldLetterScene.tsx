@@ -8,6 +8,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 import * as THREE from "three";
 import {
   drawCentered30UnitStrip,
@@ -29,7 +30,7 @@ import {
   renderIntroPaperDecalCanvas,
   sampleIntroEraserTrajectory,
 } from "@/lib/paper-decal";
-import { drawYanshuiPerimeterMotifs } from "@/lib/yanshui-illustration";
+import { createFloatingScribbleMailboxes } from "@/lib/scribble-mailbox-3d";
 import type { MailboxNumber } from "@/lib/image-library-api";
 
 export type { IntroEraserCursorState };
@@ -118,9 +119,14 @@ interface ZFoldLetterSceneProps {
   dateStamp: string;
   targetBoxRect: TargetPaperRect | null;
   onModeChange: (mode: LetterSceneMode) => void;
+  /** On-demand 3D hollow black-crayon landmark renderer during 0% -> 80% unfold */
+  onRenderLandmarksFrame?: (
+    elapsedSec: number,
+    drawProgress: number
+  ) => HTMLCanvasElement | null;
 }
 
-const UNFOLD_THRESHOLD = 0.62;
+const UNFOLD_THRESHOLD = 0.42;
 const REFOLD_THRESHOLD = 0.72;
 const MAX_FOLD_ANGLE = 2.48;
 const HALF_FOLD_RAD = THREE.MathUtils.degToRad(65); // Crisp 65° accordion Z-fold showcase
@@ -132,6 +138,7 @@ const TEX_W = LETTER_TEX_W;
 const TEX_H = LETTER_TEX_H;
 
 const SEAL_COMPLETE_SEC = 5.68;
+const OPENING_DURATION_SEC = 5.0;
 const SWIPE_LAUNCH_THRESHOLD_PX = 82;
 const LAUNCH_DURATION_MS = 780;
 const INTRO_ERASER_DURATION_MS = 2250;
@@ -140,6 +147,41 @@ const NO_SIDE_HERE_IG_URL =
 
 function normalizeAngleRad(rad: number): number {
   return ((((rad + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)) - Math.PI;
+}
+
+function smoothstepRange(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Analytic gently-underdamped spring (0 -> plush soft cushion -> exact 1.0)
+ */
+function dampedSpring01(u: number, omega: number, zeta: number): number {
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  const sqrtOneMinusZ2 = Math.sqrt(Math.max(1e-4, 1 - zeta * zeta));
+  const wd = omega * sqrtOneMinusZ2;
+  const decay = Math.exp(-zeta * omega * u);
+  const raw =
+    1 -
+    decay *
+      (Math.cos(wd * u) + (zeta / sqrtOneMinusZ2) * Math.sin(wd * u));
+  const tailBlend = smoothstepRange(0.84, 1.0, u);
+  return raw + (1 - raw) * tailBlend;
+}
+
+/**
+ * Evaluates a 3D Cubic Bezier curve at parameter t ∈ [0..1]
+ */
+function cubicBezier1D(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const inv = 1 - t;
+  return (
+    inv * inv * inv * p0 +
+    3 * inv * inv * t * p1 +
+    3 * inv * t * t * p2 +
+    t * t * t * p3
+  );
 }
 
 function computeFallbackMailboxTargets(
@@ -574,11 +616,15 @@ function createFlatShadowTexture(): THREE.CanvasTexture {
 export const ZFoldLetterScene = forwardRef<
   ZFoldSceneHandle,
   ZFoldLetterSceneProps
->(function ZFoldLetterScene({ dateStamp, targetBoxRect, onModeChange }, ref) {
+>(function ZFoldLetterScene(
+  { dateStamp, targetBoxRect, onModeChange, onRenderLandmarksFrame },
+  ref
+) {
+  const router = useRouter();
   const mountRef = useRef<HTMLDivElement | null>(null);
   const backIgLinkRef = useRef<HTMLAnchorElement | null>(null);
   const pullArrowHintRef = useRef<HTMLDivElement | null>(null);
-  const turnArrowHintRef = useRef<HTMLDivElement | null>(null);
+  const bottomPullHudRef = useRef<HTMLDivElement | null>(null);
   const [uiProgress, setUiProgress] = useState<number>(0);
   const [isDraggingPull, setIsDraggingPull] = useState<boolean>(false);
   const [isAwaitingSwipe, setIsAwaitingSwipe] = useState<boolean>(false);
@@ -594,6 +640,11 @@ export const ZFoldLetterScene = forwardRef<
   useEffect(() => {
     onModeChangeRef.current = onModeChange;
   }, [onModeChange]);
+
+  const onRenderLandmarksFrameRef = useRef(onRenderLandmarksFrame);
+  useEffect(() => {
+    onRenderLandmarksFrameRef.current = onRenderLandmarksFrame;
+  }, [onRenderLandmarksFrame]);
 
   const texturePipelineRef = useRef<{
     baseCanvas: HTMLCanvasElement | null;
@@ -685,9 +736,15 @@ export const ZFoldLetterScene = forwardRef<
     paperDisplayOffsetY: 0,
     // Gentle entrance fade-in when resetting to a brand-new blank loop
     introFadeStartMs: 0,
-    // 3D unfold stroke-reveal & ~7 FPS boiling-line tracking
+    // 5.0-second damped entrance choreography on initial entry
+    openingStartMs: 0,
+    openingLetterInterrupted: false,
+    openingInterruptBlend: 1,
+    // 3D unfold progressive landmark sketching (0% -> 80% unfold -> 100% drawn!)
     lastIllusP: -1,
     lastIllusBoilStep: -1,
+    lastIllusBlitMs: 0,
+    startedFromForcePull: false,
   });
 
   const recompositeFrontTexture = useCallback(() => {
@@ -776,6 +833,7 @@ export const ZFoldLetterScene = forwardRef<
   const triggerUnfold = useCallback(() => {
     const st = stateRef.current;
     if (st.isSendingSequence) return;
+    st.openingLetterInterrupted = true;
     st.isPointerDown = false;
     st.isExternalRefoldDrag = false;
     st.gestureMode = "none";
@@ -931,6 +989,10 @@ export const ZFoldLetterScene = forwardRef<
         st.currentRotY = -0.34;
         st.currentRotX = 0.08;
         st.introFadeStartMs = performance.now();
+        // Repeat letter loops skip the 5s initial-entry opening and appear cleanly settled
+        st.openingStartMs = -1;
+        st.openingLetterInterrupted = false;
+        st.openingInterruptBlend = 0;
         st.lastIllusP = -1;
         st.lastIllusBoilStep = -1;
         setIsAwaitingSwipe(false);
@@ -1453,6 +1515,11 @@ export const ZFoldLetterScene = forwardRef<
     shadowMesh.position.set(0, -1.04, -0.35);
     scene.add(shadowMesh);
 
+    // --- 3D HAND-DRAWN INK-LINE DOODLE MAILBOXES & MINI LETTERS DIORAMA ---
+    // Orbits rigidly around the central Z-Fold letter like rotating a camera!
+    const bgMailboxes = createFloatingScribbleMailboxes();
+    scene.add(bgMailboxes.group);
+
     let vpW = width;
     let vpH = height;
 
@@ -1471,6 +1538,12 @@ export const ZFoldLetterScene = forwardRef<
     let rafId = 0;
     let lastUiRounded = -1;
     const startClock = performance.now();
+    // Kick off the 5.0-second damped opening choreography immediately on page entry
+    if (stateRef.current.openingStartMs === 0) {
+      stateRef.current.openingStartMs = startClock;
+      stateRef.current.openingLetterInterrupted = false;
+      stateRef.current.openingInterruptBlend = 1;
+    }
 
     const animate = (now: number) => {
       rafId = window.requestAnimationFrame(animate);
@@ -1512,15 +1585,14 @@ export const ZFoldLetterScene = forwardRef<
       //           -> 1PX WIREFRAME ENVELOPE + SEAL) & STAGE 4 (PURE VERTICAL FLIGHT)
       // =======================================================================
       if (st.isSendingSequence) {
+        bgMailboxes.group.visible = false;
         if (backIgLinkRef.current) {
           backIgLinkRef.current.style.opacity = "0";
           backIgLinkRef.current.style.pointerEvents = "none";
         }
         if (pullArrowHintRef.current) {
           pullArrowHintRef.current.style.opacity = "0";
-        }
-        if (turnArrowHintRef.current) {
-          turnArrowHintRef.current.style.opacity = "0";
+          pullArrowHintRef.current.style.pointerEvents = "none";
         }
         if (st.sendCompleteFired) {
           envGroup.visible = false;
@@ -2057,51 +2129,154 @@ export const ZFoldLetterScene = forwardRef<
         0.44 + foldedProjH / targetViewportFill / (2 * tanHalfFov);
       const zFolded = Math.max(zForW, zForH);
 
-      const idleBob = Math.sin(elapsed * 1.35) * 0.024 * (1 - unfoldPhase);
+      // -----------------------------------------------------------------------
+      // 5.0-SECOND "LETTER DELIVERED FROM AFAR" CURVED GLIDE CHOREOGRAPHY
+      //   0.0s -> 3.6s: Main Z-Fold letter glides in along a graceful 3D S-curve
+      //                 from the distant upper-back sky, banking like paper
+      //                 catching a breeze, then flares gently into rest (~5.0s).
+      //   1.85s -> 5.0s: 15 surrounding gray 3D doodles emerge sequentially one
+      //                 by one from behind the letter and glide with soft damping
+      //                 into position, overlapping smoothly into free floating!
+      // -----------------------------------------------------------------------
+      const openingSec =
+        st.openingStartMs > 0
+          ? Math.max(0, (now - st.openingStartMs) / 1000)
+          : 12;
+      const uOpen = clamp01(openingSec / OPENING_DURATION_SEC);
 
-      letterRoot.position.x = flatCenterX * zoomPhase;
+      if (st.openingLetterInterrupted && st.openingInterruptBlend > 0.001) {
+        st.openingInterruptBlend *= 0.84;
+        if (st.openingInterruptBlend < 0.002) {
+          st.openingInterruptBlend = 0;
+        }
+      }
+
+      const openEff = st.openingInterruptBlend * (1 - unfoldPhase);
+
+      // Curved 3D Bezier gliding trajectory from distant upper-right-back -> left swoop
+      // -> soft low-right air-catch flare -> target resting hover (0, 0.082, 0)!
+      const uGlide = clamp01(openingSec / 3.65);
+      const flightT = 1 - Math.pow(1 - uGlide, 2.65);
+      const bezX = cubicBezier1D(1.55, -1.35, 0.46, 0.0, flightT);
+      const bezY = cubicBezier1D(2.35, 1.25, -0.26, 0.0, flightT);
+      const bezZ = cubicBezier1D(-10.5, -5.8, -0.95, 0.0, flightT);
+
+      // Plush damped hover-settle cushion overlapping the tail of the glide (2.2s -> 5.0s)
+      const hoverCushion =
+        (dampedSpring01(clamp01((openingSec - 1.8) / 3.1), 5.6, 0.68) - 1) *
+        smoothstepRange(0.25, 0.72, uOpen);
+      const openOffsetX = bezX * openEff;
+      const openOffsetY = (bezY + hoverCushion * 0.24) * openEff;
+      const openOffsetZ = bezZ * openEff;
+
+      // Natural distance-to-foreground scale arrival (pairs with real 3D perspective!)
+      const scaleArrival =
+        0.4 + 0.6 * dampedSpring01(clamp01(openingSec / 3.85), 5.8, 0.76);
+      const letterOpenScale = 1 + (scaleArrival - 1) * openEff;
+
+      // Aerodynamic paper-glider banking, nose-down glide -> nose-up air-catch flare -> rest!
+      const glideDecay = Math.pow(1 - uOpen, 1.65);
+      const flareBell = Math.sin(clamp01((openingSec - 1.2) / 2.9) * Math.PI);
+      const openRotXOffset =
+        (0.42 * Math.pow(1 - flightT, 1.45) -
+          0.17 * flareBell * (1 - smoothstepRange(0.75, 1.0, uOpen))) *
+        openEff;
+      const openRotYOffset =
+        (0.85 * Math.pow(1 - flightT, 1.35) -
+          0.26 * Math.sin(flightT * Math.PI * 1.15) * glideDecay) *
+        openEff;
+      const openRotZOffset =
+        (0.32 * Math.sin(flightT * Math.PI * 1.65) * Math.exp(-1.5 * uOpen) +
+          0.14 * Math.pow(1 - flightT, 2.0)) *
+        openEff;
+
+      // Idle zero-g breathing bob overlaps smoothly into the damped arrival tail
+      const idleBobWeight = st.openingLetterInterrupted
+        ? 1
+        : smoothstepRange(0.55, 1.0, uOpen);
+      const idleBob =
+        Math.sin(elapsed * 1.35) * 0.024 * (1 - unfoldPhase) * idleBobWeight;
+
+      letterRoot.position.x =
+        openOffsetX * (1 - zoomPhase) + flatCenterX * zoomPhase;
       letterRoot.position.y =
-        (idleBob + 0.082) * (1 - zoomPhase) + flatCenterY * zoomPhase;
-      letterRoot.position.z = 0;
-      letterRoot.scale.set(1 + (flatScaleX - 1) * zoomPhase, 1, 1);
-      letterRoot.rotation.set(st.currentRotX, st.currentRotY, 0);
+        (idleBob + 0.082 + openOffsetY) * (1 - zoomPhase) +
+        flatCenterY * zoomPhase;
+      letterRoot.position.z = openOffsetZ * (1 - zoomPhase);
+      letterRoot.scale.set(
+        (1 + (flatScaleX - 1) * zoomPhase) * letterOpenScale,
+        letterOpenScale,
+        letterOpenScale
+      );
+      letterRoot.rotation.set(
+        st.currentRotX + openRotXOffset,
+        st.currentRotY + openRotYOffset,
+        openRotZOffset
+      );
 
       camera.position.set(0, 0, zFolded + (zFlatTarget - zFolded) * zoomPhase);
       camera.lookAt(0, 0, 0);
 
+      // Ground shadow blooms softly as the gliding letter descends close to rest
+      const shadowArrive =
+        1 - (1 - smoothstepRange(0.32, 0.88, flightT)) * openEff;
       shadowMat.opacity = Math.max(
         0,
-        0.85 * (1 - unfoldPhase * 1.35) * introAlpha
+        0.85 * (1 - unfoldPhase * 1.35) * introAlpha * shadowArrive
       );
-      const shadowScale = 1 - idleBob * 0.85;
+      const shadowScale = (1 - idleBob * 0.85) * (0.35 + 0.65 * shadowArrive);
+      shadowMesh.position.x = openOffsetX * 0.45 * (1 - zoomPhase);
       shadowMesh.scale.set(shadowScale, shadowScale, 1);
 
-      // Progressive 3D unfold stroke-reveal & ~6.9 FPS boiling lines for Yanshui motifs
-      // (Shown ONLY during initial unfold before preset illustrations are erased for drawing;
-      // cleanly handed off to 2D YanshuiPaperIllustration once flat)
-      if (st.lastEmittedMode !== "flat") {
+      // Update 15 surrounding 3D crayon doodles:
+      // Emerge sequentially one-by-one from behind the arriving letter (1.85s -> 5.0s),
+      // settling calmly with damping and overlapping smoothly into eternal free floating!
+      bgMailboxes.update({
+        elapsedSec: elapsed,
+        openingSec,
+        aspect,
+        letterPosX: flatCenterX * zoomPhase,
+        letterPosY:
+          (idleBob + 0.082) * (1 - zoomPhase) + flatCenterY * zoomPhase,
+        orbitRotX: st.currentRotX,
+        orbitRotY: st.currentRotY,
+        unfoldPhase,
+        isVisible: introAlpha > 0.35 && st.lastEmittedMode !== "flat",
+      });
+
+      // Progressive 0% -> 80% 3D Hollow Black-Crayon Yanshui Landmarks Sketching!
+      // Renders on-demand via YanshuiPaperIllustration's WebGL canvas and blits onto
+      // the bending Z-Fold letter panels so illustrations draw out stroke-by-stroke
+      // as you pull open (100% drawn at 80% unfold!), with transparent grid interiors!
+      {
         const pipe = texturePipelineRef.current;
         if (pipe.illustrationCanvas) {
-          if (pipe.hasIntroDecal && p > 0.01) {
-            const boilStep = Math.floor((elapsed * 1000) / 145);
+          if (
+            st.lastEmittedMode !== "flat" &&
+            pipe.hasIntroDecal &&
+            p > 0.01 &&
+            onRenderLandmarksFrameRef.current
+          ) {
+            const drawProgress = clamp01((p - 0.02) / 0.78); // 100% drawn at 80% unfold!
             if (
-              boilStep !== st.lastIllusBoilStep ||
+              now - st.lastIllusBlitMs >= 32 ||
               Math.abs(p - st.lastIllusP) > 0.012
             ) {
-              st.lastIllusBoilStep = boilStep;
+              st.lastIllusBlitMs = now;
               st.lastIllusP = p;
+              const glCanvas = onRenderLandmarksFrameRef.current(
+                elapsed,
+                drawProgress
+              );
               const illusCtx = pipe.illustrationCanvas.getContext("2d");
-              if (illusCtx) {
+              if (
+                glCanvas &&
+                glCanvas.width > 0 &&
+                glCanvas.height > 0 &&
+                illusCtx
+              ) {
                 illusCtx.clearRect(0, 0, TEX_W, TEX_H);
-                drawYanshuiPerimeterMotifs(
-                  illusCtx,
-                  TEX_W,
-                  TEX_H,
-                  p,
-                  boilStep,
-                  elapsed,
-                  1
-                );
+                illusCtx.drawImage(glCanvas, 0, 0, TEX_W, TEX_H);
                 pipe.has3DIllustration = true;
                 recompositeFrontTexture();
               }
@@ -2111,7 +2286,7 @@ export const ZFoldLetterScene = forwardRef<
               .getContext("2d")
               ?.clearRect(0, 0, TEX_W, TEX_H);
             pipe.has3DIllustration = false;
-            st.lastIllusP = 0;
+            st.lastIllusP = -1;
             recompositeFrontTexture();
           }
         }
@@ -2211,11 +2386,20 @@ export const ZFoldLetterScene = forwardRef<
 
       renderer.render(scene, camera);
 
+      // Smooth HUD reveal overlapping the gentle damped settle tail (t = 3.2s -> 4.6s)
+      const openingHudReveal = st.openingLetterInterrupted
+        ? 1
+        : smoothstepRange(3.2, 4.6, openingSec);
+
       // Live 3D-projected clickable Instagram hitbox glued onto the backside IG pill
       const igLinkEl = backIgLinkRef.current;
       if (igLinkEl) {
         const backFacing = -Math.cos(st.currentRotY);
-        const showIgLink = p < 0.08 && backFacing > 0.52 && introAlpha > 0.5;
+        const showIgLink =
+          p < 0.08 &&
+          backFacing > 0.52 &&
+          introAlpha > 0.5 &&
+          openingHudReveal > 0.7;
         if (showIgLink) {
           scene.updateMatrixWorld(true);
           camera.updateMatrixWorld();
@@ -2245,39 +2429,37 @@ export const ZFoldLetterScene = forwardRef<
         }
       }
 
-      // Live 3D-projected directional arrow hints anchored to bottom & right edges when Z-folded
+      // Live 3D-projected bottom-center pull-down arrow hint anchored below botPanel
       const pullHintEl = pullArrowHintRef.current;
-      const turnHintEl = turnArrowHintRef.current;
-      if (pullHintEl && turnHintEl) {
+      if (pullHintEl) {
         const frontFacing = Math.cos(st.currentRotY);
         const hintAlpha =
           clamp01((frontFacing - 0.36) / 0.36) *
           clamp01(1 - p / 0.14) *
-          introAlpha;
+          introAlpha *
+          openingHudReveal;
         if (hintAlpha > 0.015) {
           scene.updateMatrixWorld(true);
           camera.updateMatrixWorld();
 
-          // 1. Bottom-center pull-down arrow hint anchored below botPanel bottom edge
           projTmpA.set(0, -panelH * 0.5, 0.02);
           botPanel.localToWorld(projTmpA);
           const botScr = projectWorldToViewport(projTmpA);
           pullHintEl.style.left = `${botScr.x.toFixed(1)}px`;
-          pullHintEl.style.top = `${Math.min(vpH - 160, botScr.y + 10).toFixed(1)}px`;
+          pullHintEl.style.top = `${Math.min(vpH - 165, botScr.y + 8).toFixed(1)}px`;
           pullHintEl.style.opacity = hintAlpha.toFixed(3);
-
-          // 2. Right-edge curved turn-to-back arrow hint wrapping behind the Z-fold right edge
-          projTmpA.set(panelW * 0.5, 0.08, 0.02);
-          botPanel.localToWorld(projTmpA);
-          const rightScr = projectWorldToViewport(projTmpA);
-          const clampedRightX = Math.min(vpW - 26, Math.max(26, rightScr.x + 8));
-          turnHintEl.style.left = `${clampedRightX.toFixed(1)}px`;
-          turnHintEl.style.top = `${rightScr.y.toFixed(1)}px`;
-          turnHintEl.style.opacity = hintAlpha.toFixed(3);
+          pullHintEl.style.pointerEvents = "auto";
         } else {
           pullHintEl.style.opacity = "0";
-          turnHintEl.style.opacity = "0";
+          pullHintEl.style.pointerEvents = "none";
         }
+      }
+
+      // Fade in bottom PULL TO OPEN HUD smoothly over the opening settle tail
+      const bottomHudEl = bottomPullHudRef.current;
+      if (bottomHudEl) {
+        const progressFade = Math.max(0, 1 - Math.max(0, p * 100 - 45) / 35);
+        bottomHudEl.style.opacity = (progressFade * openingHudReveal).toFixed(3);
       }
 
       const pct = Math.round(p * 100);
@@ -2318,6 +2500,7 @@ export const ZFoldLetterScene = forwardRef<
       disposed = true;
       window.cancelAnimationFrame(rafId);
       ro.disconnect();
+      bgMailboxes.dispose();
       disposableGeoms.forEach((g) => g.dispose());
       disposableMats.forEach((m) => m.dispose());
       sharedTexture.dispose();
@@ -2365,9 +2548,12 @@ export const ZFoldLetterScene = forwardRef<
       if (st.lastEmittedMode === "flat") return;
 
       e.currentTarget.setPointerCapture(e.pointerId);
+      // Gracefully hand off if user touches/drags during the 5s opening choreography
+      st.openingLetterInterrupted = true;
       st.isExternalRefoldDrag = false;
       st.isPointerDown = true;
       st.isAutoAnimating = false;
+      st.startedFromForcePull = forcePull;
       st.gestureMode = forcePull ? "pull" : "none";
       st.pointerStartX = e.clientX;
       st.pointerStartY = e.clientY;
@@ -2375,6 +2561,8 @@ export const ZFoldLetterScene = forwardRef<
       st.lastPointerY = e.clientY;
       st.startProgress = st.targetProgress;
       if (forcePull) {
+        st.currentRotY = normalizeAngleRad(st.currentRotY);
+        st.targetRotY = normalizeAngleRad(st.targetRotY);
         setIsDraggingPull(true);
       }
     },
@@ -2429,8 +2617,9 @@ export const ZFoldLetterScene = forwardRef<
       st.lastPointerX = e.clientX;
       st.lastPointerY = e.clientY;
 
-      if (st.gestureMode === "none" && Math.hypot(totalDx, totalDy) > 8) {
-        if (totalDy > 10 && Math.abs(totalDy) > Math.abs(totalDx) * 1.2) {
+      if (st.gestureMode === "none" && Math.hypot(totalDx, totalDy) > 6) {
+        // Generous downward pull cone anywhere on screen (fixes earlier hypot>8 vs dy>10 deadlock!)
+        if (totalDy > 3 && totalDy >= Math.abs(totalDx) * 0.68) {
           st.gestureMode = "pull";
           // Wrap current Y rotation into [-PI, PI] so pulling down always unwinds cleanly
           st.currentRotY = normalizeAngleRad(st.currentRotY);
@@ -2443,7 +2632,7 @@ export const ZFoldLetterScene = forwardRef<
       }
 
       if (st.gestureMode === "pull") {
-        const nextP = clamp01(st.startProgress + totalDy / 210);
+        const nextP = clamp01(st.startProgress + totalDy / 165);
         st.targetProgress = nextP;
         if (nextP > 0.02) {
           emitModeIfChanged("transitioning");
@@ -2544,8 +2733,15 @@ export const ZFoldLetterScene = forwardRef<
       }
 
       if (st.gestureMode === "pull") {
+        const totalMove = Math.hypot(
+          e.clientX - st.pointerStartX,
+          e.clientY - st.pointerStartY
+        );
         st.isAutoAnimating = true;
-        if (st.targetProgress >= UNFOLD_THRESHOLD) {
+        if (
+          st.targetProgress >= UNFOLD_THRESHOLD ||
+          (st.startedFromForcePull && totalMove < 12)
+        ) {
           st.targetProgress = 1;
           st.targetRotX = 0;
           st.targetRotY = 0;
@@ -2554,6 +2750,7 @@ export const ZFoldLetterScene = forwardRef<
         }
       }
 
+      st.startedFromForcePull = false;
       st.gestureMode = "none";
     },
     []
@@ -2564,6 +2761,7 @@ export const ZFoldLetterScene = forwardRef<
       const st = stateRef.current;
       if (st.lastEmittedMode === "flat" || st.isSendingSequence) return;
 
+      st.openingLetterInterrupted = true;
       st.isExternalRefoldDrag = false;
       const delta = e.deltaY * 0.0016;
       const nextP = clamp01(st.targetProgress + delta);
@@ -2586,6 +2784,29 @@ export const ZFoldLetterScene = forwardRef<
   const isFoldedUI = sceneMode === "folded" || sceneMode === "transitioning";
   const chromeOpacity = isFoldedUI ? Math.max(0, 1 - uiProgress / 42) : 0;
   const canInteractMount = isFoldedUI || (sceneMode === "sending" && isAwaitingSwipe);
+
+  // Hidden 5-tap trigger on the top-left serial label (navigates to /esp32-test)
+  const secretEsp32TapRef = useRef<{ count: number; lastTapMs: number }>({
+    count: 0,
+    lastTapMs: 0,
+  });
+  const handleSecretEsp32Tap = useCallback(
+    (e: React.MouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      const now = Date.now();
+      const tracker = secretEsp32TapRef.current;
+      if (now - tracker.lastTapMs > 2500) {
+        tracker.count = 0;
+      }
+      tracker.count += 1;
+      tracker.lastTapMs = now;
+      if (tracker.count >= 5) {
+        tracker.count = 0;
+        router.push("/esp32-test");
+      }
+    },
+    [router]
+  );
 
   // Hidden 5-tap trigger on the top-right date (links to light-msg-server.nosidehere.space)
   const secretDateTapRef = useRef<{ count: number; lastTapMs: number }>({
@@ -2667,18 +2888,29 @@ export const ZFoldLetterScene = forwardRef<
         <span className="sr-only">No Side Here Instagram (@no.side.here)</span>
       </a>
 
-      {/* Live 3D-projected Bottom-Center Pull-Down Arrow + Small Circular Draw Icon (when Z-folded) */}
+      {/* Live 3D-projected Bottom-Center Pull-Down Arrow + Small Circular Draw Icon (generous interactive pull/tap zone!) */}
       <div
         ref={pullArrowHintRef}
-        aria-hidden="true"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          handlePointerDown(e, true);
+        }}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        role="button"
+        tabIndex={isFoldedUI ? 0 : -1}
+        aria-label="向下拉開或點擊展開信紙開始繪畫"
         style={{
           left: "50%",
           top: "66%",
           opacity: 0,
+          pointerEvents: "none",
+          touchAction: "none",
           transform: "translate(-50%, 0)",
           willChange: "left, top, opacity",
         }}
-        className="pointer-events-none fixed z-10 flex flex-col items-center gap-1.5 select-none"
+        className="fixed z-20 -mt-3 flex cursor-grab flex-col items-center gap-1.5 px-16 py-6 select-none active:cursor-grabbing"
       >
         <svg
           width="18"
@@ -2720,60 +2952,6 @@ export const ZFoldLetterScene = forwardRef<
         </span>
       </div>
 
-      {/* Live 3D-projected Right-Edge Turn-to-Back Curved Arrow + Small Circular Info Icon (when Z-folded) */}
-      <div
-        ref={turnArrowHintRef}
-        aria-hidden="true"
-        style={{
-          left: "88%",
-          top: "52%",
-          opacity: 0,
-          transform: "translate(-50%, -50%)",
-          willChange: "left, top, opacity",
-        }}
-        className="pointer-events-none fixed z-10 flex flex-col items-center gap-1 select-none"
-      >
-        <svg
-          width="30"
-          height="26"
-          viewBox="0 0 36 32"
-          fill="none"
-          className="animate-hint-turn-back text-[#222222]/78 drop-shadow-[0_1px_3px_rgba(252,251,250,0.95)]"
-        >
-          {/* Hand-drawn curved 3D wrap-around arrow curling behind the right edge of the Z-fold */}
-          <path
-            d="M4.5 23.5C15.5 26.8 29.5 23.2 31.2 14.5C32.4 8.2 25.4 5.2 15.8 8.2"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-          />
-          <path
-            d="M19.8 4.1C17.8 5.8 16.2 7.2 14.8 8.4C17.2 9.4 19.6 10.6 21.8 11.9"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-        <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[#222222]/28 bg-[#FCFBFA]/90 text-[#222222]/75 shadow-[0_1px_4px_rgba(34,34,34,0.06)] backdrop-blur-[2px]">
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
-          >
-            <circle cx="8" cy="4.4" r="0.95" fill="currentColor" />
-            <path
-              d="M8 7.1V11.8"
-              stroke="currentColor"
-              strokeWidth="1.45"
-              strokeLinecap="round"
-            />
-          </svg>
-        </span>
-      </div>
-
       {/* Quiet desktop flanking captions when folded */}
       <div
         aria-hidden="true"
@@ -2793,7 +2971,20 @@ export const ZFoldLetterScene = forwardRef<
         style={{ opacity: chromeOpacity }}
         className="pointer-events-none absolute top-5 right-5 left-5 z-10 flex items-center justify-between font-mono text-[10px] tracking-[0.22em] text-[#8C8C8A] transition-opacity duration-150 sm:top-7 sm:right-10 sm:left-10"
       >
-        <span>NO. 001 // Z-FOLD</span>
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={handleSecretEsp32Tap}
+          tabIndex={-1}
+          aria-label="信紙編號"
+          className={`-m-2 cursor-default select-none border-0 bg-transparent p-2 font-mono text-[10px] tracking-[0.22em] text-[#8C8C8A] focus:outline-none ${
+            isFoldedUI && chromeOpacity > 0.2
+              ? "pointer-events-auto"
+              : "pointer-events-none"
+          }`}
+        >
+          NO. 001 // Z-FOLD
+        </button>
         <span className="hidden md:inline">
           DRAG TO ORBIT · PULL DOWN TO UNFOLD
         </span>
@@ -2814,13 +3005,15 @@ export const ZFoldLetterScene = forwardRef<
         </button>
       </div>
 
-      {/* Bottom Pull-to-Open Indicator when folded (enhanced visibility & clarity) */}
+      {/* Bottom Pull-to-Open Indicator when folded (fades in smoothly as 5s opening settles) */}
       {isFoldedUI && (
         <div
+          ref={bottomPullHudRef}
           style={{
-            opacity: Math.max(0, 1 - Math.max(0, uiProgress - 45) / 35),
+            opacity: 0,
+            willChange: "opacity",
           }}
-          className="pointer-events-none absolute right-0 bottom-7 left-0 flex flex-col items-center gap-3 px-5 transition-opacity duration-150 sm:bottom-9"
+          className="pointer-events-none absolute right-0 bottom-7 left-0 flex flex-col items-center gap-3 px-5 sm:bottom-9"
         >
           <div className="sketch-progress relative h-[5px] w-48 border border-[#222222]/35 bg-[#FAF9F6] sm:w-52">
             <span
@@ -2840,7 +3033,7 @@ export const ZFoldLetterScene = forwardRef<
             onPointerUp={handlePointerUp}
             onPointerCancel={handlePointerUp}
             style={{ touchAction: "none" }}
-            className="pointer-events-auto flex items-center gap-2"
+            className="pointer-events-auto -my-3 flex items-center gap-2 px-10 py-3"
           >
             <button
               type="button"

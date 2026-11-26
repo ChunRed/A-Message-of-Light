@@ -23,6 +23,7 @@ import {
   publishLightSequenceToHardware,
   sampleDrawingToGridAnd30Led,
 } from "@/lib/grid-sampling";
+import { publishEsp32Payload } from "@/lib/esp32-light-channel";
 import {
   MailboxNumber,
   parseMailboxParam,
@@ -62,7 +63,10 @@ import {
   SparkleOverlayHandle,
   SparkleParticleOverlay,
 } from "@/components/SparkleParticleOverlay";
-import { YanshuiPaperIllustration } from "@/components/YanshuiPaperIllustration";
+import {
+  YanshuiIllustrationHandle,
+  YanshuiPaperIllustration,
+} from "@/components/YanshuiPaperIllustration";
 
 type ToolMode = "brush" | "eraser";
 type ActivePostMode = 0 | MailboxNumber;
@@ -162,6 +166,7 @@ export function LightMessageLetterApp() {
 
   // Refs
   const sceneRef = useRef<ZFoldSceneHandle | null>(null);
+  const yanshuiIllusRef = useRef<YanshuiIllustrationHandle | null>(null);
   const sparkleRef = useRef<SparkleOverlayHandle | null>(null);
   const dissolvePaletteRef = useRef<SparkleColorTriplet[]>([]);
   const stageTimerRef = useRef<number | null>(null);
@@ -173,6 +178,7 @@ export function LightMessageLetterApp() {
   const tooFewHideTimerRef = useRef<number | null>(null);
   const cooldownUntilRef = useRef<number>(0);
   const strokeCountRef = useRef<number>(0);
+  const latestSampledLedValuesRef = useRef<number[] | null>(null);
   const pendingWebpPromiseRef = useRef<Promise<Blob> | null>(null);
   const lastUploadPayloadRef = useRef<{
     blob: Blob;
@@ -801,6 +807,12 @@ export function LightMessageLetterApp() {
     [returnToSendHome]
   );
 
+  const handleRenderLandmarksFrame = useCallback(
+    (elapsedSec: number, drawProgress: number) =>
+      yanshuiIllusRef.current?.renderUnfoldFrame(elapsedSec, drawProgress) ?? null,
+    []
+  );
+
   const handleMailboxTargetsMeasured = useCallback(
     (targets: MailboxTargetScreenPoint[]) => {
       sceneRef.current?.setMailboxScreenTargets(targets);
@@ -1250,7 +1262,9 @@ export function LightMessageLetterApp() {
 
     // Run Best-First Quadtree detail-richness sampling -> 30-CH [0..255] + feature anchors
     const result = sampleDrawingToGridAnd30Led(canvas, width, height);
+    latestSampledLedValuesRef.current = result.ledValues;
     publishLightSequenceToHardware(result.ledValues);
+    publishEsp32Payload(result.ledValues, sentMailbox, "sampled");
 
     setSamplingResult(result);
     setPostSendStage("sampling");
@@ -1261,6 +1275,7 @@ export function LightMessageLetterApp() {
     introSequencePhase,
     postSendStage,
     sceneMode,
+    sentMailbox,
     strokeCount,
     triggerTooFewStrokesHint,
   ]);
@@ -1389,6 +1404,15 @@ export function LightMessageLetterApp() {
             setTargetedMailbox(chosenMailbox);
             startSendCooldown();
             setPostSendStage("launching");
+
+            // Forward final 30-CH sampled light sequence & chosen physical mailbox to /esp32-test
+            if (latestSampledLedValuesRef.current) {
+              publishEsp32Payload(
+                latestSampledLedValuesRef.current,
+                chosenMailbox,
+                "dispatched"
+              );
+            }
 
             // Upload WebP directly to Cloudflare R2 & Supabase under the user's chosen mailbox (1..6)
             const webpPromise = pendingWebpPromiseRef.current;
@@ -1557,6 +1581,7 @@ export function LightMessageLetterApp() {
         dateStamp={dateStamp}
         targetBoxRect={paperTargetRect}
         onModeChange={handleSceneModeChange}
+        onRenderLandmarksFrame={handleRenderLandmarksFrame}
       />
 
       {/* ================================================================= */}
@@ -1589,8 +1614,9 @@ export function LightMessageLetterApp() {
               className="relative h-full w-full"
               style={{ transformOrigin: "center center" }}
             >
-              {/* Procedural Hand-Drawn Yanshui Festive Motifs & 100%-Open Firework Layer */}
+              {/* 3D Hollow Black-Crayon Yanshui Landmarks (draws progressively 0%->80% during unfold!) */}
               <YanshuiPaperIllustration
+                ref={yanshuiIllusRef}
                 isVisible={isFlatMounted}
                 celebrationTriggerId={celebrationCycleId}
                 isErasing={isErasingIllustrations}

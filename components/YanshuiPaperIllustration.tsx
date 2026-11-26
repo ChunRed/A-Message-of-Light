@@ -1,17 +1,31 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import * as THREE from "three";
 import { eraseIntroDecalSegment } from "@/lib/paper-decal";
+import { sampleIllustrationEraserSweep } from "@/lib/yanshui-illustration";
 import {
-  drawYanshuiPerimeterMotifs,
-  sampleIllustrationEraserSweep,
-  YanshuiCelebrationSystem,
-} from "@/lib/yanshui-illustration";
+  createYanshuiLandmarks3DScene,
+  type YanshuiLandmarks3DHandle,
+} from "@/lib/yanshui-landmarks-3d";
+
+export interface YanshuiIllustrationHandle {
+  /**
+   * Renders one frame of the 3D black-crayon landmarks at the given `elapsedSec`
+   * and progressive `drawProgress ∈ [0..1]` (mapped from 2% -> 80% unfold) and
+   * returns the live WebGL canvas so ZFoldLetterScene can hardware-blit it right
+   * onto the unfolding 3D Z-Fold letter panels!
+   */
+  renderUnfoldFrame: (
+    elapsedSec: number,
+    drawProgress: number
+  ) => HTMLCanvasElement | null;
+}
 
 export interface YanshuiPaperIllustrationProps {
   /** Visible while the Z-fold letter is flat in 2D mode (before sending/sampling) */
   isVisible: boolean;
-  /** Incrementing cycle token that triggers the 100%-open celebratory firework burst once per unfold */
+  /** Cycle reset token (0 resets cleanly on new letter loop) */
   celebrationTriggerId: number;
   /** Active while wiping preset illustrations off the paper right after the user clicks "開始創作" */
   isErasing: boolean;
@@ -19,31 +33,35 @@ export interface YanshuiPaperIllustrationProps {
   isErased: boolean;
 }
 
-/** ~6.9 FPS boiling-line cadence (classic 6–8 FPS hand-drawn feel) */
-const BOIL_FRAME_INTERVAL_MS = 145;
 /** Synchronized with PaperPencilGuide's 1.65s rubber-eraser sweep */
 const ERASE_SWEEP_DURATION_MS = 1580;
 
 /**
- * Procedural, hand-drawn bold oil-pastel & gouache Yanshui illustration overlay layered:
- * - ABOVE the paper grid & fold shadows (3D ZFoldLetterScene at z-10)
- * - AROUND the central blessing typography (never covering central text)
- * - BELOW the user's interactive 2D drawing canvas (z-10 inside paperVisualRef)
- *
- * When the user clicks "開始創作", an organic back-and-forth rubber-eraser sweep
- * physically scrubs all preset illustrations (蜂炮, 八角樓, 水月橋) clean off the paper,
- * leaving a crisp blank sheet ready for freehand creation.
+ * 3D Hollow Black-Line Wax-Crayon Yanshui Landmark Overlay:
+ * - While unfolding (0% -> 80% -> 100%): renders on-demand via `renderUnfoldFrame`
+ *   so the landmarks sketch themselves stroke-by-stroke onto the bending Z-Fold
+ *   letter panels (reaching 100% drawn right at 80% unfold!), with transparent
+ *   interiors letting the stationery paper grid shine cleanly through!
+ * - Once flat (`isVisible = true`): takes over seamlessly at 60fps using the exact
+ *   same WebGL scene & clock phase with ZERO jump or double-render.
+ * - On clicking "開始創作" (`isErasing = true`): snapshots the current 3D frame onto
+ *   a 2D canvas so the organic rubber eraser scrubs all 3D crayon landmarks cleanly
+ *   off the paper, then disposes GPU resources once `isErased = true`.
  */
-export function YanshuiPaperIllustration({
-  isVisible,
-  celebrationTriggerId,
-  isErasing,
-  isErased,
-}: YanshuiPaperIllustrationProps) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const perimeterCacheRef = useRef<HTMLCanvasElement | null>(null);
-  const celebrationRef = useRef<YanshuiCelebrationSystem | null>(null);
-  const lastTriggeredIdRef = useRef<number>(0);
+export const YanshuiPaperIllustration = forwardRef<
+  YanshuiIllustrationHandle,
+  YanshuiPaperIllustrationProps
+>(function YanshuiPaperIllustration(
+  { isVisible, celebrationTriggerId, isErasing, isErased },
+  ref
+) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const eraseCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const eraseCacheRef = useRef<HTMLCanvasElement | null>(null);
+
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const landmarksRef = useRef<YanshuiLandmarks3DHandle | null>(null);
 
   const sizeRef = useRef<{ width: number; height: number; dpr: number }>({
     width: 0,
@@ -59,12 +77,9 @@ export function YanshuiPaperIllustration({
   });
 
   const stateRef = useRef({
-    lastBoilStep: -1,
-    cacheDirty: true,
-    pendingCelebration: false,
     startClockMs: 0,
-    // Organic rubber-eraser wipe-off state
-    eraseStarted: false,
+    lastUnfoldElapsedSec: 0,
+    eraseSnapshotTaken: false,
     eraseDone: false,
     eraseStartMs: 0,
     eraseLastP: 0,
@@ -74,29 +89,77 @@ export function YanshuiPaperIllustration({
     eraseSeed: 1,
   });
 
+  const ensureCanvasSized = () => {
+    const host = hostRef.current;
+    const renderer = rendererRef.current;
+    const landmarks = landmarksRef.current;
+    const eraseCanvas = eraseCanvasRef.current;
+    const eraseCache = eraseCacheRef.current;
+    if (!host || !renderer || !landmarks || !eraseCanvas || !eraseCache) {
+      return false;
+    }
+
+    const rect = host.getBoundingClientRect();
+    // Fallback to classic stationery aspect (512 x 724) if measured before layout settles
+    const nextW = rect.width >= 32 ? Math.floor(rect.width) : 512;
+    const nextH = rect.height >= 32 ? Math.floor(rect.height) : 724;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const prev = sizeRef.current;
+
+    if (prev.width !== nextW || prev.height !== nextH || prev.dpr !== dpr) {
+      sizeRef.current = { width: nextW, height: nextH, dpr };
+      renderer.setPixelRatio(dpr);
+      renderer.setSize(nextW, nextH, false);
+      landmarks.resize(nextW, nextH);
+
+      eraseCanvas.width = Math.round(nextW * dpr);
+      eraseCanvas.height = Math.round(nextH * dpr);
+      eraseCache.width = Math.round(nextW * dpr);
+      eraseCache.height = Math.round(nextH * dpr);
+    }
+    return true;
+  };
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      renderUnfoldFrame: (elapsedSec: number, drawProgress: number) => {
+        if (propsRef.current.isErased) return null;
+        const renderer = rendererRef.current;
+        const landmarks = landmarksRef.current;
+        const glCanvas = glCanvasRef.current;
+        if (!renderer || !landmarks || !glCanvas) return null;
+        if (!ensureCanvasSized()) return null;
+
+        stateRef.current.lastUnfoldElapsedSec = elapsedSec;
+        landmarks.update(elapsedSec, drawProgress);
+        renderer.render(landmarks.scene, landmarks.camera);
+        return glCanvas;
+      },
+    }),
+    []
+  );
+
   useEffect(() => {
     const prevErasing = propsRef.current.isErasing;
+    const prevVisible = propsRef.current.isVisible;
     propsRef.current = { isVisible, celebrationTriggerId, isErasing, isErased };
     const st = stateRef.current;
 
     if (celebrationTriggerId === 0) {
-      lastTriggeredIdRef.current = 0;
-      st.pendingCelebration = false;
-      st.eraseStarted = false;
-      st.eraseDone = false;
-      st.cacheDirty = true;
-      st.lastBoilStep = -1;
-      celebrationRef.current?.clear();
-    } else if (celebrationTriggerId !== lastTriggeredIdRef.current) {
-      lastTriggeredIdRef.current = celebrationTriggerId;
-      st.pendingCelebration = true;
-      st.eraseStarted = false;
+      st.startClockMs = 0;
+      st.lastUnfoldElapsedSec = 0;
+      st.eraseSnapshotTaken = false;
       st.eraseDone = false;
     }
 
+    // Sync clock seamlessly when handing off from ZFold unfold (p=100%) to live flat view!
+    if (isVisible && !prevVisible) {
+      st.startClockMs = performance.now() - st.lastUnfoldElapsedSec * 1000;
+    }
+
     if (isErasing && !prevErasing) {
-      celebrationRef.current?.clear();
-      st.eraseStarted = true;
+      st.eraseSnapshotTaken = false;
       st.eraseDone = false;
       st.eraseStartMs = performance.now();
       st.eraseLastP = 0;
@@ -105,131 +168,115 @@ export function YanshuiPaperIllustration({
     }
 
     if (!isVisible || isErased) {
-      celebrationRef.current?.clear();
-      const canvas = canvasRef.current;
-      if (canvas && canvas.width > 0 && canvas.height > 0) {
-        const ctx = canvas.getContext("2d");
+      const eraseCanvas = eraseCanvasRef.current;
+      if (eraseCanvas && eraseCanvas.width > 0 && eraseCanvas.height > 0) {
+        const ctx = eraseCanvas.getContext("2d");
         if (ctx) {
           ctx.save();
           ctx.setTransform(1, 0, 0, 1, 0, 0);
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.clearRect(0, 0, eraseCanvas.width, eraseCanvas.height);
           ctx.restore();
         }
-      }
-      if (!isVisible) {
-        st.lastBoilStep = -1;
       }
     }
   }, [celebrationTriggerId, isErased, isErasing, isVisible]);
 
-  // Keep canvas & offscreen boiling-line cache sized crisply to the paper slot
+  // Keep lightweight WebGL renderer ready while `!isErased` (for BOTH 0%->80% unfold
+  // progressive sketching AND opened flat 60fps loop). Dispose immediately once erased!
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (isErased) return;
 
-    if (!perimeterCacheRef.current) {
-      perimeterCacheRef.current = document.createElement("canvas");
+    const host = hostRef.current;
+    const glCanvas = glCanvasRef.current;
+    const eraseCanvas = eraseCanvasRef.current;
+    if (!host || !glCanvas || !eraseCanvas) return;
+
+    if (!eraseCacheRef.current) {
+      eraseCacheRef.current = document.createElement("canvas");
     }
-    if (!celebrationRef.current) {
-      celebrationRef.current = new YanshuiCelebrationSystem();
-    }
 
-    const syncDimensions = () => {
-      const rect = canvas.getBoundingClientRect();
-      const nextW = Math.max(1, Math.floor(rect.width));
-      const nextH = Math.max(1, Math.floor(rect.height));
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const prev = sizeRef.current;
+    const renderer = new THREE.WebGLRenderer({
+      canvas: glCanvas,
+      alpha: true,
+      antialias: true,
+      preserveDrawingBuffer: true,
+      powerPreference: "high-performance",
+    });
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    rendererRef.current = renderer;
 
-      if (prev.width === nextW && prev.height === nextH && prev.dpr === dpr) {
-        return;
-      }
+    const landmarks = createYanshuiLandmarks3DScene();
+    landmarksRef.current = landmarks;
 
-      sizeRef.current = { width: nextW, height: nextH, dpr };
-
-      canvas.width = Math.round(nextW * dpr);
-      canvas.height = Math.round(nextH * dpr);
-
-      const cache = perimeterCacheRef.current;
-      if (cache) {
-        cache.width = Math.round(nextW * dpr);
-        cache.height = Math.round(nextH * dpr);
-      }
-
-      stateRef.current.cacheDirty = true;
-      stateRef.current.lastBoilStep = -1;
+    sizeRef.current = { width: 0, height: 0, dpr: 1 };
+    const handleResize = () => {
+      ensureCanvasSized();
     };
+    handleResize();
 
-    syncDimensions();
-    const ro = new ResizeObserver(syncDimensions);
-    ro.observe(canvas);
-    window.addEventListener("resize", syncDimensions);
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(host);
+    window.addEventListener("resize", handleResize);
 
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", syncDimensions);
+      window.removeEventListener("resize", handleResize);
+      landmarks.dispose();
+      renderer.dispose();
+      landmarksRef.current = null;
+      rendererRef.current = null;
+      sizeRef.current = { width: 0, height: 0, dpr: 1 };
     };
-  }, []);
+  }, [isErased]);
 
-  // Main animation loop: active ONLY while flat AND not yet fully erased
+  // Live 60fps animation loop runs ONLY while opened flat (`isVisible && !isErased`)
+  // (Zero background CPU/GPU while folded!)
   const shouldRunLoop = isVisible && !isErased;
 
   useEffect(() => {
     if (!shouldRunLoop) return;
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    if (!perimeterCacheRef.current) {
-      perimeterCacheRef.current = document.createElement("canvas");
-    }
-    if (!celebrationRef.current) {
-      celebrationRef.current = new YanshuiCelebrationSystem();
+    const glCanvas = glCanvasRef.current;
+    const eraseCanvas = eraseCanvasRef.current;
+    const eraseCache = eraseCacheRef.current;
+    const renderer = rendererRef.current;
+    const landmarks = landmarksRef.current;
+    if (!glCanvas || !eraseCanvas || !eraseCache || !renderer || !landmarks) {
+      return;
     }
 
     const st = stateRef.current;
     if (st.startClockMs === 0) {
-      st.startClockMs = performance.now();
-    }
-    if (!propsRef.current.isErasing) {
-      st.cacheDirty = true;
-      st.lastBoilStep = -1;
+      st.startClockMs = performance.now() - st.lastUnfoldElapsedSec * 1000;
     }
 
     let rafId = 0;
-    let lastFrameMs = performance.now();
 
-    const paintFrame = (nowMs: number) => {
+    const renderFrame = (nowMs: number) => {
+      if (!ensureCanvasSized()) return;
       const { width: w, height: h, dpr } = sizeRef.current;
       if (w < 16 || h < 16) return;
 
-      const ctx = canvas.getContext("2d");
-      const cache = perimeterCacheRef.current;
-      const cacheCtx = cache?.getContext("2d");
-      const celebration = celebrationRef.current;
-      if (!ctx || !cache || !cacheCtx || !celebration) return;
-
       // =====================================================================
-      // MODE A: ORGANIC RUBBER-ERASER SWEEP WIPING ALL PRESET ART OFF PAPER
+      // MODE A: ORGANIC RUBBER-ERASER SWEEP WIPING THE 3D CRAYON ART OFF PAPER
       // =====================================================================
       if (propsRef.current.isErasing) {
         if (st.eraseDone) return;
 
-        // Guarantee the frozen artwork exists on cache before scrubbing
-        if (st.cacheDirty) {
-          st.cacheDirty = false;
+        const ctx = eraseCanvas.getContext("2d");
+        const cacheCtx = eraseCache.getContext("2d");
+        if (!ctx || !cacheCtx) return;
+
+        if (!st.eraseSnapshotTaken) {
+          st.eraseSnapshotTaken = true;
           const elapsedSec = Math.max(0, (nowMs - st.startClockMs) / 1000);
+          landmarks.update(elapsedSec, 1);
+          renderer.render(landmarks.scene, landmarks.camera);
+
           cacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
           cacheCtx.clearRect(0, 0, w, h);
-          drawYanshuiPerimeterMotifs(
-            cacheCtx,
-            w,
-            h,
-            1,
-            Math.max(0, st.lastBoilStep),
-            elapsedSec,
-            1
-          );
+          cacheCtx.drawImage(glCanvas, 0, 0, w, h);
         }
 
         const elapsedErase = Math.max(0, nowMs - st.eraseStartMs);
@@ -273,55 +320,34 @@ export function YanshuiPaperIllustration({
           return;
         }
 
-        ctx.drawImage(cache, 0, 0, cache.width, cache.height, 0, 0, w, h);
+        ctx.drawImage(
+          eraseCache,
+          0,
+          0,
+          eraseCache.width,
+          eraseCache.height,
+          0,
+          0,
+          w,
+          h
+        );
         return;
       }
 
       // =====================================================================
-      // MODE B: NORMAL ~6.9 FPS BOILING PERIMETER + 60FPS FIREWORK BURSTS
+      // MODE B: LIVE 60FPS 3D HOLLOW BLACK-CRAYON LANDMARK ANIMATION
       // =====================================================================
-      if (st.pendingCelebration) {
-        st.pendingCelebration = false;
-        celebration.trigger(w, h);
-      }
-
-      const dt = Math.min(0.05, Math.max(0.001, (nowMs - lastFrameMs) / 1000));
-      lastFrameMs = nowMs;
-
-      const elapsedMs = Math.max(0, nowMs - st.startClockMs);
-      const elapsedSec = elapsedMs / 1000;
-      const boilStep = Math.floor(elapsedMs / BOIL_FRAME_INTERVAL_MS);
-
-      const boilChanged = boilStep !== st.lastBoilStep || st.cacheDirty;
-      const fireworksActive = celebration.isRunning();
-
-      if (!boilChanged && !fireworksActive) {
-        return;
-      }
-
-      if (boilChanged) {
-        st.lastBoilStep = boilStep;
-        st.cacheDirty = false;
-        cacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        cacheCtx.clearRect(0, 0, w, h);
-        drawYanshuiPerimeterMotifs(cacheCtx, w, h, 1, boilStep, elapsedSec, 1);
-      }
-
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-      ctx.drawImage(cache, 0, 0, cache.width, cache.height, 0, 0, w, h);
-
-      if (fireworksActive) {
-        celebration.updateAndDraw(ctx, dt, w, h);
-      }
+      const elapsedSec = Math.max(0, (nowMs - st.startClockMs) / 1000);
+      st.lastUnfoldElapsedSec = elapsedSec;
+      landmarks.update(elapsedSec, 1);
+      renderer.render(landmarks.scene, landmarks.camera);
     };
 
-    // Paint initial frame immediately so 3D -> 2D handoff at 100% has zero blank frame
-    paintFrame(performance.now());
+    renderFrame(performance.now());
 
     const tick = (nowMs: number) => {
       if (!propsRef.current.isVisible || propsRef.current.isErased) return;
-      paintFrame(nowMs);
+      renderFrame(nowMs);
       rafId = window.requestAnimationFrame(tick);
     };
 
@@ -334,13 +360,28 @@ export function YanshuiPaperIllustration({
     };
   }, [shouldRunLoop]);
 
+  const showContainer = isVisible && !isErased;
+
   return (
-    <canvas
-      ref={canvasRef}
+    <div
+      ref={hostRef}
       aria-hidden="true"
-      className={`pointer-events-none absolute inset-0 z-[5] block h-full w-full select-none ${
-        isVisible && !isErased ? "opacity-100" : "opacity-0"
+      className={`pointer-events-none absolute inset-0 z-[5] select-none ${
+        showContainer ? "opacity-100" : "opacity-0"
       }`}
-    />
+    >
+      <canvas
+        ref={glCanvasRef}
+        className={`absolute inset-0 block h-full w-full ${
+          isErasing ? "opacity-0" : "opacity-100"
+        }`}
+      />
+      <canvas
+        ref={eraseCanvasRef}
+        className={`absolute inset-0 block h-full w-full ${
+          isErasing ? "opacity-100" : "opacity-0"
+        }`}
+      />
+    </div>
   );
-}
+});
