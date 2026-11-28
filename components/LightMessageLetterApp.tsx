@@ -25,6 +25,10 @@ import {
 } from "@/lib/grid-sampling";
 import { publishEsp32Payload } from "@/lib/esp32-light-channel";
 import {
+  emitClientLightMessage,
+  prewarmLightSocket,
+} from "@/lib/light-socket-client";
+import {
   MailboxNumber,
   parseMailboxParam,
   UploadProgressPhase,
@@ -1300,6 +1304,7 @@ export function LightMessageLetterApp() {
 
     setSamplingResult(result);
     setPostSendStage("sampling");
+    prewarmLightSocket();
   }, [
     cooldownRemainingSec,
     dateStamp,
@@ -1438,11 +1443,16 @@ export function LightMessageLetterApp() {
             setPostSendStage("launching");
 
             // Forward final 30-CH sampled light sequence & chosen physical mailbox to /esp32-test
+            // AND emit realtime Socket.IO `client-msg` -> server relays to ESP32 `esp-msg`
             if (latestSampledLedValuesRef.current) {
               publishEsp32Payload(
                 latestSampledLedValuesRef.current,
                 chosenMailbox,
                 "dispatched"
+              );
+              emitClientLightMessage(
+                latestSampledLedValuesRef.current,
+                chosenMailbox
               );
             }
 

@@ -1,7 +1,9 @@
 import "./env.js";
 import crypto from "node:crypto";
+import http from "node:http";
 import cors from "cors";
 import express from "express";
+import { Server as SocketIOServer } from "socket.io";
 import { getAllowedOrigins } from "./env.js";
 import {
   ALLOWED_IMAGE_MIME_TYPES,
@@ -46,6 +48,7 @@ app.use((_req, res, next) => {
 });
 
 const MAILBOX_COUNT = 5;
+const LED_CHANNEL_COUNT = 30;
 
 /**
  * Strictly parses a mailbox / post number in the inclusive range 1..5.
@@ -56,6 +59,22 @@ function parseMailboxNumber(raw) {
   const str = String(raw).trim();
   if (!/^[1-5]$/.test(str)) return null;
   return Number.parseInt(str, 10);
+}
+
+/**
+ * Validates and clamps a 30-channel LED sample array into integers [0..255].
+ */
+function parseLedValues30(raw) {
+  if (!Array.isArray(raw) || raw.length !== LED_CHANNEL_COUNT) {
+    return null;
+  }
+  const normalized = new Array(LED_CHANNEL_COUNT);
+  for (let i = 0; i < LED_CHANNEL_COUNT; i++) {
+    const n = Number(raw[i]);
+    if (!Number.isFinite(n)) return null;
+    normalized[i] = Math.max(0, Math.min(255, Math.round(n)));
+  }
+  return normalized;
 }
 
 /**
@@ -567,9 +586,89 @@ app.use((err, _req, res, _next) => {
   });
 });
 
-app.listen(port, () => {
+// =========================================================================
+// SOCKET.IO v4 REALTIME RELAY (Web `client-msg` -> ESP32 `esp-msg`)
+// =========================================================================
+const httpServer = http.createServer(app);
+
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin(origin, callback) {
+      if (isOriginAllowed(origin, null)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`Socket.IO origin not allowed: ${origin}`));
+    },
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket", "polling"],
+  pingInterval: 25000,
+  pingTimeout: 20000,
+});
+
+// Per-socket anti-spam window for `client-msg` (max 10 messages / 60s per socket)
+const SOCKET_MSG_WINDOW_MS = 60 * 1000;
+const SOCKET_MSG_MAX_PER_WINDOW = 10;
+
+io.on("connection", (socket) => {
+  console.log(`[Socket.IO] Client connected: ${socket.id}`);
+
+  let windowStartMs = Date.now();
+  let windowCount = 0;
+
+  socket.on("client-msg", (rawPayload, ack) => {
+    const now = Date.now();
+    if (now - windowStartMs >= SOCKET_MSG_WINDOW_MS) {
+      windowStartMs = now;
+      windowCount = 0;
+    }
+    windowCount += 1;
+    if (windowCount > SOCKET_MSG_MAX_PER_WINDOW) {
+      if (typeof ack === "function") {
+        ack({ ok: false, error: "Too many client-msg events" });
+      }
+      return;
+    }
+
+    const mailbox = parseMailboxNumber(rawPayload?.mailbox);
+    const ledValues = parseLedValues30(
+      rawPayload?.ledValues ?? rawPayload?.values
+    );
+
+    if (mailbox === null || ledValues === null) {
+      if (typeof ack === "function") {
+        ack({
+          ok: false,
+          error: "Invalid payload: requires mailbox (1..5) and 30 ledValues (0..255)",
+        });
+      }
+      return;
+    }
+
+    const relayPayload = {
+      mailbox,
+      ledValues,
+    };
+
+    io.emit("esp-msg", relayPayload);
+    console.log(
+      `[Socket.IO] Relayed client-msg -> esp-msg (mailbox=${mailbox}, from=${socket.id})`
+    );
+
+    if (typeof ack === "function") {
+      ack({ ok: true, mailbox });
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`[Socket.IO] Client disconnected: ${socket.id} (${reason})`);
+  });
+});
+
+httpServer.listen(port, () => {
   console.log(
-    `[Light-msg Server] Listening on http://localhost:${port} (mailboxes: 1..${MAILBOX_COUNT}, turnstile: ${
+    `[Light-msg Server] HTTP + Socket.IO listening on http://localhost:${port} (mailboxes: 1..${MAILBOX_COUNT}, turnstile: ${
       isTurnstileEnabled() ? "enabled" : "disabled"
     }, maxUploadBytes: ${getMaxUploadBytes()})`
   );
