@@ -100,6 +100,9 @@ const MAX_HISTORY = 5;
 const MIN_STROKES_TO_SEND = 2;
 const SEND_COOLDOWN_SEC = 30;
 const SEND_COOLDOWN_STORAGE_KEY = "light_msg_send_cooldown_until";
+const IS_TURNSTILE_CONFIGURED = Boolean(
+  (process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "").trim()
+);
 
 export function LightMessageLetterApp() {
   const [sceneMode, setSceneMode] = useState<LetterSceneMode>("folded");
@@ -156,6 +159,10 @@ export function LightMessageLetterApp() {
 
   // Cloud R2 upload status & URL `?post` mode (default 0 = send home)
   const [activePost, setActivePost] = useState<ActivePostMode>(0);
+  const [isPostParamResolved, setIsPostParamResolved] = useState<boolean>(false);
+  const [isEntryVerified, setIsEntryVerified] = useState<boolean>(
+    !IS_TURNSTILE_CONFIGURED
+  );
   const [libraryRefreshSignal, setLibraryRefreshSignal] = useState<number>(0);
   const [uploadStatus, setUploadStatus] = useState<UploadStatusState>({
     state: "idle",
@@ -797,6 +804,9 @@ export function LightMessageLetterApp() {
   // Return to the default send-letter home page (`post = 0`)
   const returnToSendHome = useCallback(() => {
     setActivePost(0);
+    if (IS_TURNSTILE_CONFIGURED) {
+      setIsEntryVerified(false);
+    }
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("post");
@@ -836,9 +846,13 @@ export function LightMessageLetterApp() {
       if (parsed !== null) {
         setSentMailbox(parsed);
         setActivePost(parsed);
+        if (IS_TURNSTILE_CONFIGURED) {
+          setIsEntryVerified(false);
+        }
       } else {
         setActivePost(0);
       }
+      setIsPostParamResolved(true);
     };
 
     const rafId = window.requestAnimationFrame(() => {
@@ -1131,7 +1145,6 @@ export function LightMessageLetterApp() {
           );
         }, 5500);
       } catch (err) {
-        console.error("[Light-msg Upload Error]", err);
         setUploadStatus({
           state: "error",
           message:
@@ -1212,7 +1225,14 @@ export function LightMessageLetterApp() {
     paperTransformStateRef.current.scale = 1;
     paperTransformStateRef.current.offsetY = 0;
 
+    setSceneMode("folded");
     sceneRef.current?.resetToFreshFolded();
+
+    // Prepare a fresh Turnstile token before starting the next letter cycle
+    if (IS_TURNSTILE_CONFIGURED && turnstileRef.current?.isEnabled()) {
+      setIsEntryVerified(false);
+      turnstileRef.current.reset();
+    }
   }, [updateHistoryFlags]);
 
   // =========================================================================
@@ -1268,8 +1288,7 @@ export function LightMessageLetterApp() {
         effectiveDate,
         0.85
       );
-    } catch (err) {
-      console.error("Failed to snapshot pre-sampling letter:", err);
+    } catch {
       pendingWebpPromiseRef.current = null;
     }
 
@@ -1434,7 +1453,6 @@ export function LightMessageLetterApp() {
               webpPromise
                 .then((blob) => runDirectR2Upload(blob, chosenMailbox))
                 .catch((err) => {
-                  console.error("Failed to generate WebP blob:", err);
                   setUploadStatus({
                     state: "error",
                     message:
@@ -1467,7 +1485,20 @@ export function LightMessageLetterApp() {
     startStage3DissolveAndSend();
   }, [startStage3DissolveAndSend]);
 
-  const isFlatMounted = sceneMode === "flat" && postSendStage === "idle";
+  const handleTurnstileGateVerified = useCallback(() => {
+    setIsEntryVerified(true);
+  }, []);
+
+  const shouldShowPreEntryGate =
+    isPostParamResolved &&
+    activePost === 0 &&
+    IS_TURNSTILE_CONFIGURED &&
+    !isEntryVerified;
+  const isMainSceneReady =
+    isPostParamResolved && activePost === 0 && isEntryVerified;
+
+  const isFlatMounted =
+    isMainSceneReady && sceneMode === "flat" && postSendStage === "idle";
   const isFlatEditable = isFlatMounted && introSequencePhase === "ready";
   const isSamplingOverlayMounted =
     postSendStage === "sampling" ||
@@ -1588,14 +1619,17 @@ export function LightMessageLetterApp() {
 
       {/* ================================================================= */}
       {/* CONTINUOUS 3D Z-FOLD LETTER + WIREFRAME ENVELOPE + FLIGHT SCENE   */}
+      {/* Only starts after Turnstile pre-entry check completes cleanly     */}
       {/* ================================================================= */}
-      <ZFoldLetterScene
-        ref={sceneRef}
-        dateStamp={dateStamp}
-        targetBoxRect={paperTargetRect}
-        onModeChange={handleSceneModeChange}
-        onRenderLandmarksFrame={handleRenderLandmarksFrame}
-      />
+      {isMainSceneReady && (
+        <ZFoldLetterScene
+          ref={sceneRef}
+          dateStamp={dateStamp}
+          targetBoxRect={paperTargetRect}
+          onModeChange={handleSceneModeChange}
+          onRenderLandmarksFrame={handleRenderLandmarksFrame}
+        />
+      )}
 
       {/* ================================================================= */}
       {/* 2D DRAWING OVERLAY + STAGE 1 SAMPLING + INTEGRATED BOTTOM BAR     */}
@@ -2168,10 +2202,15 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* CLOUDFLARE TURNSTILE BOT PROTECTION (INTERACTION-ONLY WIDGET)     */}
+      {/* CLOUDFLARE TURNSTILE PRE-ENTRY GATE (NEVER INTERRUPTS DRAWING)    */}
       {/* ================================================================= */}
-      {activePost === 0 && (
-        <TurnstileWidget ref={turnstileRef} action="upload_letter" />
+      {isPostParamResolved && activePost === 0 && (
+        <TurnstileWidget
+          ref={turnstileRef}
+          action="upload_letter"
+          isPreEntryGate={shouldShowPreEntryGate}
+          onGateVerified={handleTurnstileGateVerified}
+        />
       )}
 
       {/* ================================================================= */}

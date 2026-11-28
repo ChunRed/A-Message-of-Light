@@ -44,17 +44,21 @@ export interface TurnstileWidgetHandle {
   /** Whether a site key is configured and Turnstile protection is active */
   isEnabled: () => boolean;
   /**
-   * Resolves with a fresh single-use Turnstile token, waiting if verification
-   * is still in flight, then schedules a reset for the next upload.
+   * Consumes the pre-verified Turnstile token (or refreshes if expired after 5 min).
+   * Does NOT reset mid-animation so Turnstile never pops up while interacting.
    */
   consumeToken: () => Promise<string>;
-  /** Resets the widget to fetch a brand-new token */
+  /** Resets the widget cleanly between letter cycles */
   reset: () => void;
 }
 
 interface TurnstileWidgetProps {
   siteKey?: string;
   action?: string;
+  /** When true, displays the full-screen pre-entry gate before entering the main app */
+  isPreEntryGate: boolean;
+  /** Invoked once Turnstile verifies the visitor on the pre-entry gate */
+  onGateVerified?: () => void;
 }
 
 const TURNSTILE_SCRIPT_SRC =
@@ -117,7 +121,7 @@ function loadTurnstileApi(): Promise<TurnstileApi> {
 function formatTurnstileError(errorCode?: string | number): string {
   const code = errorCode !== undefined ? String(errorCode) : "";
   if (code === "110200") {
-    return "Turnstile 網域未授權（110200），請於 Cloudflare 後台加入目前測試網域（如 localhost）";
+    return "Turnstile 網域未授權（110200），請於 Cloudflare 後台加入目前網域";
   }
   if (code) {
     return `安全驗證失敗（代碼 ${code}），請重試`;
@@ -128,7 +132,10 @@ function formatTurnstileError(errorCode?: string | number): string {
 export const TurnstileWidget = forwardRef<
   TurnstileWidgetHandle,
   TurnstileWidgetProps
->(function TurnstileWidget({ siteKey, action = "upload_letter" }, ref) {
+>(function TurnstileWidget(
+  { siteKey, action = "upload_letter", isPreEntryGate, onGateVerified },
+  ref
+) {
   const resolvedSiteKey = (
     siteKey ??
     process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ??
@@ -139,6 +146,10 @@ export const TurnstileWidget = forwardRef<
   const widgetIdRef = useRef<string | null>(null);
   const tokenRef = useRef<string>("");
   const lastErrorRef = useRef<string | null>(null);
+  const onGateVerifiedRef = useRef(onGateVerified);
+  onGateVerifiedRef.current = onGateVerified;
+
+  const isAwaitingConsumeRef = useRef(false);
   const waitersRef = useRef<
     Array<{
       resolve: (token: string) => void;
@@ -148,8 +159,12 @@ export const TurnstileWidget = forwardRef<
   >([]);
 
   const [isInteractive, setIsInteractive] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [showUploadChallenge, setShowUploadChallenge] = useState(false);
 
   const flushWaitersWithToken = useCallback((token: string) => {
+    isAwaitingConsumeRef.current = false;
+    setShowUploadChallenge(false);
     const waiters = waitersRef.current.splice(0, waitersRef.current.length);
     for (const w of waiters) {
       window.clearTimeout(w.timeoutId);
@@ -158,6 +173,8 @@ export const TurnstileWidget = forwardRef<
   }, []);
 
   const flushWaitersWithError = useCallback((message: string) => {
+    isAwaitingConsumeRef.current = false;
+    setShowUploadChallenge(false);
     const waiters = waitersRef.current.splice(0, waitersRef.current.length);
     for (const w of waiters) {
       window.clearTimeout(w.timeoutId);
@@ -168,6 +185,9 @@ export const TurnstileWidget = forwardRef<
   const resetWidget = useCallback(() => {
     tokenRef.current = "";
     lastErrorRef.current = null;
+    setGateError(null);
+    setIsInteractive(false);
+    setShowUploadChallenge(false);
     if (widgetIdRef.current && window.turnstile) {
       try {
         window.turnstile.reset(widgetIdRef.current);
@@ -178,7 +198,11 @@ export const TurnstileWidget = forwardRef<
   }, []);
 
   useEffect(() => {
-    if (!resolvedSiteKey) return;
+    if (!resolvedSiteKey) {
+      onGateVerifiedRef.current?.();
+      return;
+    }
+
     let cancelled = false;
 
     loadTurnstileApi()
@@ -191,11 +215,15 @@ export const TurnstileWidget = forwardRef<
           action,
           theme: "light",
           appearance: "interaction-only",
-          "refresh-expired": "auto",
+          // Never auto-refresh mid-session so Turnstile cannot interrupt active drawing
+          "refresh-expired": "manual",
           callback: (token: string) => {
             tokenRef.current = token;
             lastErrorRef.current = null;
+            setGateError(null);
             setIsInteractive(false);
+            setShowUploadChallenge(false);
+            onGateVerifiedRef.current?.();
             flushWaitersWithToken(token);
           },
           "expired-callback": () => {
@@ -204,21 +232,30 @@ export const TurnstileWidget = forwardRef<
           "timeout-callback": () => {
             tokenRef.current = "";
             setIsInteractive(false);
-            flushWaitersWithError("安全驗證逾時，請重試");
+            const msg = "安全驗證逾時，請重新嘗試";
+            lastErrorRef.current = msg;
+            setGateError(msg);
+            flushWaitersWithError(msg);
           },
           "error-callback": (errorCode?: string | number) => {
             const msg = formatTurnstileError(errorCode);
             tokenRef.current = "";
             lastErrorRef.current = msg;
+            setGateError(msg);
             setIsInteractive(false);
             flushWaitersWithError(msg);
             return true;
           },
           "before-interactive-callback": () => {
             setIsInteractive(true);
+            // Only show an upload-time overlay if consumeToken() is actively waiting
+            if (isAwaitingConsumeRef.current) {
+              setShowUploadChallenge(true);
+            }
           },
           "after-interactive-callback": () => {
             setIsInteractive(false);
+            setShowUploadChallenge(false);
           },
         });
       })
@@ -229,6 +266,7 @@ export const TurnstileWidget = forwardRef<
             ? err.message
             : "無法載入 Cloudflare Turnstile 安全驗證";
         lastErrorRef.current = msg;
+        setGateError(msg);
         flushWaitersWithError(msg);
       });
 
@@ -268,39 +306,36 @@ export const TurnstileWidget = forwardRef<
 
         if (existingToken) {
           tokenRef.current = "";
-          // Schedule widget reset so the next send gets a fresh single-use token
-          window.setTimeout(() => {
-            resetWidget();
-          }, 0);
           return existingToken;
         }
 
-        if (lastErrorRef.current && widgetIdRef.current && window.turnstile) {
-          // Retry once automatically when a prior attempt errored
+        // Token expired (>5 min) or already consumed on retry -> request a fresh one
+        if (widgetIdRef.current && window.turnstile) {
+          isAwaitingConsumeRef.current = true;
           resetWidget();
-        } else if (lastErrorRef.current && !widgetIdRef.current) {
+        } else if (lastErrorRef.current) {
           throw new Error(lastErrorRef.current);
         }
 
+        isAwaitingConsumeRef.current = true;
         const freshToken = await new Promise<string>((resolve, reject) => {
           const timeoutId = window.setTimeout(() => {
             waitersRef.current = waitersRef.current.filter(
               (w) => w.timeoutId !== timeoutId
             );
+            isAwaitingConsumeRef.current = false;
+            setShowUploadChallenge(false);
             reject(
               new Error(
                 lastErrorRef.current || "等待安全驗證逾時，請重新送出"
               )
             );
-          }, 15_000);
+          }, 20_000);
 
           waitersRef.current.push({ resolve, reject, timeoutId });
         });
 
         tokenRef.current = "";
-        window.setTimeout(() => {
-          resetWidget();
-        }, 0);
         return freshToken;
       },
     }),
@@ -309,28 +344,74 @@ export const TurnstileWidget = forwardRef<
 
   if (!resolvedSiteKey) return null;
 
+  // Keep the exact same <div ref={containerRef} /> mounted across transitions so
+  // Cloudflare's iframe never reloads or prompts mid-interaction.
+  const wrapperClass = isPreEntryGate
+    ? "fixed inset-0 z-[80] flex flex-col items-center justify-center bg-[#FCFBFA] px-5 text-[#222222]"
+    : showUploadChallenge
+      ? "fixed inset-0 z-[80] flex items-center justify-center bg-[#0B0B0D]/65 px-4 backdrop-blur-[3px]"
+      : "pointer-events-none fixed right-0 bottom-0 -z-10 opacity-0";
+
   return (
-    <div
-      className={
-        isInteractive
-          ? "fixed inset-0 z-[70] flex items-center justify-center bg-[#0B0B0D]/65 px-4 backdrop-blur-[3px]"
-          : "pointer-events-none fixed right-3 bottom-3 z-[60]"
-      }
-      aria-live="polite"
-    >
+    <div className={wrapperClass} aria-live="polite">
       <div
         className={
-          isInteractive
-            ? "sketch-card pointer-events-auto flex flex-col items-center gap-3 border border-[#222222] bg-[#FDFCF9] px-5 py-4 shadow-lg"
-            : ""
+          isPreEntryGate
+            ? "flex w-full max-w-[360px] flex-col items-center gap-4 text-center"
+            : showUploadChallenge
+              ? "sketch-card pointer-events-auto flex flex-col items-center gap-3 border border-[#222222] bg-[#FDFCF9] px-5 py-4 shadow-lg"
+              : ""
         }
       >
-        {isInteractive && (
+        {isPreEntryGate && (
+          <>
+            <div className="flex flex-col items-center gap-1.5">
+              <p className="font-mono text-[10px] tracking-[0.26em] text-[#8C8C8A]">
+                A MESSAGE OF LIGHT
+              </p>
+              <h1 className="text-base font-normal tracking-[0.28em] text-[#222222]">
+                一則光的訊息
+              </h1>
+            </div>
+
+            {!gateError && (
+              <div className="flex items-center gap-2 text-xs tracking-[0.16em] text-[#666664]">
+                <span
+                  aria-hidden="true"
+                  className="animate-dot-pulse inline-block h-1.5 w-1.5 rounded-full bg-[#222222]/60"
+                />
+                <span>
+                  {isInteractive
+                    ? "請先完成安全驗證以展開信紙"
+                    : "正在確認安全連線⋯"}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+
+        {!isPreEntryGate && showUploadChallenge && (
           <p className="text-xs tracking-[0.16em] text-[#222222]">
-            請完成安全驗證以寄出這則光的訊息
+            驗證已過期，請完成確認以寄出信件
           </p>
         )}
-        <div ref={containerRef} />
+
+        <div ref={containerRef} className="min-h-[1px]" />
+
+        {isPreEntryGate && gateError && (
+          <div className="flex flex-col items-center gap-2.5">
+            <p className="text-xs tracking-[0.08em] text-[#DF7A5E]">
+              {gateError}
+            </p>
+            <button
+              type="button"
+              onClick={resetWidget}
+              className="sketch-pill inline-flex h-8 items-center justify-center border border-[#222222] bg-[#222222] px-4 text-xs tracking-[0.16em] text-[#FAF9F6] transition-colors hover:bg-[#FDFCF9] hover:text-[#222222]"
+            >
+              重新驗證
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

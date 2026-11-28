@@ -14,8 +14,8 @@ export function PwaRegister() {
 
     navigator.serviceWorker
       .register("/sw.js", { scope: "/" })
-      .catch((err) => {
-        console.warn("Service worker registration skipped:", err);
+      .catch(() => {
+        // Ignore service worker registration errors
       });
   }, []);
 

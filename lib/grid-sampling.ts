@@ -568,8 +568,6 @@ export function publishLightSequenceToHardware(ledValues: number[]): void {
       },
     })
   );
-
-  console.log("[一則光的訊息] 30-CH Quadtree Detail Sequence (0–255):", copy);
 }
 
 export const SETTLED_STRIP_Y_RATIO = 0.825;
