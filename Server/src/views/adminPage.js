@@ -2,7 +2,7 @@
  * Renders the self-contained HTML Admin Management Page for Light-msg Server.
  * Accessible via https://light-msg-server.nosidehere.space (GET / and GET /admin).
  */
-export function renderAdminPageHtml({ requiresAdminToken }) {
+export function renderAdminPageHtml({ requiresAdminToken, mailboxCount = 5 }) {
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -256,6 +256,24 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .meta-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .mailbox-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid rgba(34, 34, 34, 0.22);
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 10px;
+      white-space: nowrap;
+      font-family: -apple-system, BlinkMacSystemFont, "Noto Sans TC", sans-serif;
+    }
 
     .empty {
       margin: 48px auto;
@@ -317,7 +335,7 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
 
     <div class="toolbar">
       <div class="toolbar-left">
-        <span class="current-mailbox-tag" id="currentMailboxLabel">目前檢視：郵筒 #1</span>
+        <span class="current-mailbox-tag" id="currentMailboxLabel">目前檢視：全部圖片</span>
         <span class="badge" id="countBadge">0 張圖片</span>
         <span class="badge" id="selectedBadge">已選取 0 張</span>
       </div>
@@ -346,9 +364,11 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
 
   <script>
     const REQUIRES_TOKEN = ${JSON.stringify(Boolean(requiresAdminToken))};
+    const MAILBOX_COUNT = ${JSON.stringify(Number(mailboxCount) || 5)};
     const PAGE_LIMIT = 48;
 
-    let currentMailbox = 1;
+    /** "all" to view all mailboxes, or integer 1..MAILBOX_COUNT */
+    let currentMailbox = "all";
     let currentPage = 1;
     let hasMore = false;
     let items = [];
@@ -449,9 +469,30 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
       tokenBar.append(input, verifyBtn, badge);
     }
 
+    function getCurrentViewLabel() {
+      return currentMailbox === "all"
+        ? "全部圖片"
+        : "郵筒 #" + currentMailbox;
+    }
+
     function renderMailboxButtons() {
       mailboxBar.innerHTML = "";
-      for (let m = 1; m <= 6; m++) {
+
+      const allBtn = document.createElement("button");
+      allBtn.type = "button";
+      allBtn.className = "btn" + (currentMailbox === "all" ? " active" : "");
+      allBtn.textContent = "全部圖片";
+      allBtn.setAttribute("aria-pressed", String(currentMailbox === "all"));
+      allBtn.addEventListener("click", () => {
+        if (currentMailbox === "all") return;
+        currentMailbox = "all";
+        selectedIds.clear();
+        renderMailboxButtons();
+        loadMailboxImages(1, false);
+      });
+      mailboxBar.appendChild(allBtn);
+
+      for (let m = 1; m <= MAILBOX_COUNT; m++) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "btn" + (currentMailbox === m ? " active" : "");
@@ -469,7 +510,7 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
     }
 
     function updateSelectionUi() {
-      currentMailboxLabel.textContent = "目前檢視：郵筒 #" + currentMailbox;
+      currentMailboxLabel.textContent = "目前檢視：" + getCurrentViewLabel();
       countBadge.textContent = items.length + " 張圖片";
       selectedBadge.textContent = "已選取 " + selectedIds.size + " 張";
       deleteSelectedBtn.disabled = selectedIds.size === 0;
@@ -482,7 +523,10 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
       imageGrid.innerHTML = "";
       if (items.length === 0) {
         emptyState.style.display = "block";
-        emptyState.textContent = "郵筒 #" + currentMailbox + " 目前沒有已存入的圖片。";
+        emptyState.textContent =
+          currentMailbox === "all"
+            ? "目前沒有任何已存入的圖片。"
+            : "郵筒 #" + currentMailbox + " 目前沒有已存入的圖片。";
       } else {
         emptyState.style.display = "none";
       }
@@ -530,19 +574,30 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
 
         const img = document.createElement("img");
         img.src = item.url;
-        img.alt = "郵筒 #" + currentMailbox + " 圖片";
+        img.alt =
+          item.mailbox != null
+            ? "郵筒 #" + item.mailbox + " 圖片"
+            : "信件圖片";
         img.loading = "lazy";
         thumbWrap.appendChild(img);
 
         const meta = document.createElement("div");
         meta.className = "meta";
+        const metaRow = document.createElement("div");
+        metaRow.className = "meta-row";
         const timeDiv = document.createElement("div");
         timeDiv.textContent = formatDate(item.created_at) || "—";
+        const mbChip = document.createElement("span");
+        mbChip.className = "mailbox-chip";
+        mbChip.textContent =
+          item.mailbox != null ? "郵筒 #" + item.mailbox : "未分類";
+        metaRow.append(timeDiv, mbChip);
+
         const keyDiv = document.createElement("div");
         keyDiv.className = "meta-key";
         keyDiv.title = item.key || item.url || "";
         keyDiv.textContent = item.key || item.url || "";
-        meta.append(timeDiv, keyDiv);
+        meta.append(metaRow, keyDiv);
 
         card.append(top, thumbWrap, meta);
         imageGrid.appendChild(card);
@@ -554,17 +609,25 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
 
     async function loadMailboxImages(page, append) {
       clearStatus();
+      const viewLabel = getCurrentViewLabel();
       if (!append) {
         imageGrid.innerHTML = "";
         emptyState.style.display = "block";
-        emptyState.textContent = "正在載入郵筒 #" + currentMailbox + " 的圖片…";
+        emptyState.textContent = "正在載入「" + viewLabel + "」…";
       }
       loadMoreBtn.disabled = true;
 
       try {
-        const res = await fetch(
-          "/api/images?post=" + encodeURIComponent(currentMailbox) + "&page=" + page + "&limit=" + PAGE_LIMIT
-        );
+        const query =
+          currentMailbox === "all"
+            ? "/api/images?post=all&page=" + page + "&limit=" + PAGE_LIMIT
+            : "/api/images?post=" +
+              encodeURIComponent(currentMailbox) +
+              "&page=" +
+              page +
+              "&limit=" +
+              PAGE_LIMIT;
+        const res = await fetch(query);
         const data = await res.json();
         if (!res.ok) {
           throw new Error(data.error || "載入失敗 (" + res.status + ")");
@@ -584,7 +647,7 @@ export function renderAdminPageHtml({ requiresAdminToken }) {
         renderGrid();
       } catch (err) {
         emptyState.style.display = "none";
-        showStatus("載入郵筒 #" + currentMailbox + " 失敗：" + err.message, "error");
+        showStatus("載入「" + viewLabel + "」失敗：" + err.message, "error");
       } finally {
         loadMoreBtn.disabled = false;
       }

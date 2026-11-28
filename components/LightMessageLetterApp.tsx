@@ -59,6 +59,10 @@ import { PencilDraftingBox } from "@/components/PencilDraftingBox";
 import { SentMailboxNotice } from "@/components/SentMailboxNotice";
 import { SwipeUpSendGuide } from "@/components/SwipeUpSendGuide";
 import {
+  TurnstileWidget,
+  TurnstileWidgetHandle,
+} from "@/components/TurnstileWidget";
+import {
   SparkleColorTriplet,
   SparkleOverlayHandle,
   SparkleParticleOverlay,
@@ -166,6 +170,7 @@ export function LightMessageLetterApp() {
 
   // Refs
   const sceneRef = useRef<ZFoldSceneHandle | null>(null);
+  const turnstileRef = useRef<TurnstileWidgetHandle | null>(null);
   const yanshuiIllusRef = useRef<YanshuiIllustrationHandle | null>(null);
   const sparkleRef = useRef<SparkleOverlayHandle | null>(null);
   const dissolvePaletteRef = useRef<SparkleColorTriplet[]>([]);
@@ -820,7 +825,7 @@ export function LightMessageLetterApp() {
     []
   );
 
-  // Detect `?post=1..6` and populate client-local `dateStamp` safely after hydration
+  // Detect `?post=1..5` and populate client-local `dateStamp` safely after hydration
   // (avoids React #418 SSR/client text mismatch across timezones).
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1079,8 +1084,9 @@ export function LightMessageLetterApp() {
   }, []);
 
   // =========================================================================
-  // DIRECT-TO-R2 WEBP UPLOAD + SUPABASE DB PERSISTENCE (WITH MAILBOX 1..6)
+  // DIRECT-TO-R2 WEBP UPLOAD + SUPABASE DB PERSISTENCE (WITH MAILBOX 1..5)
   // Binary WebP Blob uploads directly from browser -> Cloudflare R2 (never via Node)
+  // Protected by Cloudflare Turnstile + Presigned ContentLength + HeadObject check
   // =========================================================================
   const runDirectR2Upload = useCallback(
     async (blob: Blob, mailbox: MailboxNumber) => {
@@ -1090,13 +1096,19 @@ export function LightMessageLetterApp() {
       }
 
       lastUploadPayloadRef.current = { blob, mailbox };
+      const turnstileEnabled = Boolean(turnstileRef.current?.isEnabled());
       setUploadStatus({
         state: "uploading",
-        phase: "requesting-url",
+        phase: turnstileEnabled ? "verifying-human" : "requesting-url",
         mailbox,
       });
 
       try {
+        let turnstileToken: string | undefined;
+        if (turnstileEnabled && turnstileRef.current) {
+          turnstileToken = await turnstileRef.current.consumeToken();
+        }
+
         const effectiveDate = dateStamp || getFormattedDateStamp();
         const safeStamp = effectiveDate.replace(/\./g, "-");
         const savedRow = await uploadWebpBlobToLibrary(
@@ -1105,7 +1117,8 @@ export function LightMessageLetterApp() {
           `light-message-post${mailbox}-${safeStamp}.webp`,
           (phase) => {
             setUploadStatus({ state: "uploading", phase, mailbox });
-          }
+          },
+          turnstileToken
         );
 
         lastUploadPayloadRef.current = null;
@@ -1312,12 +1325,12 @@ export function LightMessageLetterApp() {
   }, []);
 
   // =========================================================================
-  // STAGE 3 & STAGE 4 (PRESERVED STROKES ON 3D FOLDING PAPER -> 6-MAILBOX SWIPE):
+  // STAGE 3 & STAGE 4 (PRESERVED STROKES ON 3D FOLDING PAPER -> 5-MAILBOX SWIPE):
   // 1) Bake user's hand-drawn strokes onto 3D letter texture (NEVER fade out!)
   // 2) Fade out Quadtree overlay with subtle ambient golden sparkles
   // 3) 3D 65° Z-fold -> Left/Right pendulum showcase -> Press flat -> Slide into
   //    envelope pocket (strokes stay visible on paper throughout!) -> Seal
-  // 4) Step 5: Show 6 mailboxes at top; user swipes toward desired mailbox (1..6)
+  // 4) Step 5: Show 5 mailboxes at top; user swipes toward desired mailbox (1..5)
   //    -> upload WebP to R2 for chosen mailbox & launch envelope directly into it!
   // =========================================================================
   const startStage3DissolveAndSend = useCallback(() => {
@@ -1414,7 +1427,7 @@ export function LightMessageLetterApp() {
               );
             }
 
-            // Upload WebP directly to Cloudflare R2 & Supabase under the user's chosen mailbox (1..6)
+            // Upload WebP directly to Cloudflare R2 & Supabase under the user's chosen mailbox (1..5)
             const webpPromise = pendingWebpPromiseRef.current;
             pendingWebpPromiseRef.current = null;
             if (webpPromise) {
@@ -1998,7 +2011,7 @@ export function LightMessageLetterApp() {
 
       {/* ================================================================= */}
       {/* STAGE 2: HAND-DRAWN PENCIL DRAFTING SAVE CONFIRMATION CARD        */}
-      {/* Mailbox selection (1..6) is now performed interactively on swipe! */}
+      {/* Mailbox selection (1..5) is now performed interactively on swipe! */}
       {/* ================================================================= */}
       {postSendStage === "confirm-save" && (
         <div
@@ -2072,7 +2085,7 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* STEP 5: 6-MAILBOX TOP TARGET ROW + DIRECTIONAL SWIPE-UP LAUNCH    */}
+      {/* STEP 5: 5-MAILBOX TOP TARGET ROW + DIRECTIONAL SWIPE-UP LAUNCH    */}
       {/* Stays visible during launching so the envelope visibly flies in!  */}
       {/* ================================================================= */}
       {(postSendStage === "awaiting-swipe" || postSendStage === "launching") && (
@@ -2155,7 +2168,14 @@ export function LightMessageLetterApp() {
       )}
 
       {/* ================================================================= */}
-      {/* SINGLE-MAILBOX GALLERY VIEW (ONLY WHEN `?post=1..6`, NEVER AT 0)  */}
+      {/* CLOUDFLARE TURNSTILE BOT PROTECTION (INTERACTION-ONLY WIDGET)     */}
+      {/* ================================================================= */}
+      {activePost === 0 && (
+        <TurnstileWidget ref={turnstileRef} action="upload_letter" />
+      )}
+
+      {/* ================================================================= */}
+      {/* SINGLE-MAILBOX GALLERY VIEW (ONLY WHEN `?post=1..5`, NEVER AT 0)  */}
       {/* ================================================================= */}
       {activePost !== 0 && (
         <LetterLibraryView

@@ -1,10 +1,15 @@
 export const MAILBOX_NUMBERS = [1, 2, 3, 4, 5] as const;
 export type MailboxNumber = (typeof MAILBOX_NUMBERS)[number];
 
+/** Default client-side upload size guard matching server MAX_UPLOAD_BYTES (5 MiB) */
+export const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
 export interface PresignedUploadResponse {
   uploadUrl: string;
   key: string;
   publicUrl: string;
+  expiresIn?: number;
+  maxBytes?: number;
 }
 
 export interface LibraryImageItem {
@@ -23,6 +28,7 @@ export interface LibraryImagesPageResponse {
 }
 
 export type UploadProgressPhase =
+  | "verifying-human"
   | "requesting-url"
   | "uploading-r2"
   | "saving-record";
@@ -99,19 +105,30 @@ export async function convertSourceToWebpBlob(
 
 /**
  * Full direct-to-R2 upload & Supabase persistence flow (binary NEVER passes through Node server):
- * 1. POST ${API_BASE_URL}/api/upload-url -> { uploadUrl, publicUrl, key }
+ * 1. POST ${API_BASE_URL}/api/upload-url -> { contentType, contentLength, turnstileToken }
+ *    Returns short-lived presigned PUT URL bound to exact ContentType & ContentLength
  * 2. PUT uploadUrl (Content-Type: image/webp, body: blob) directly to Cloudflare R2
- * 3. POST ${API_BASE_URL}/api/images -> { url: publicUrl, key, mailbox }
+ * 3. POST ${API_BASE_URL}/api/images -> { key, mailbox } (server verifies via R2 HeadObject & builds URL)
  */
 export async function uploadWebpBlobToLibrary(
   blob: Blob,
   mailbox: MailboxNumber,
   fileName = "light-message.webp",
-  onPhaseChange?: (phase: UploadProgressPhase) => void
+  onPhaseChange?: (phase: UploadProgressPhase) => void,
+  turnstileToken?: string
 ): Promise<LibraryImageItem> {
   const apiBase = getApiBaseUrl();
 
-  // Step 1: Request presigned PUT URL from Express server (JSON metadata only)
+  if (blob.size <= 0) {
+    throw new Error("圖片資料為空，無法上傳");
+  }
+  if (blob.size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `圖片大小超過上限（${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB）`
+    );
+  }
+
+  // Step 1: Request presigned PUT URL from Express server (JSON metadata + Turnstile token)
   onPhaseChange?.("requesting-url");
   const presignRes = await fetch(`${apiBase}/api/upload-url`, {
     method: "POST",
@@ -119,6 +136,8 @@ export async function uploadWebpBlobToLibrary(
     body: JSON.stringify({
       fileName,
       contentType: "image/webp",
+      contentLength: blob.size,
+      ...(turnstileToken ? { turnstileToken } : {}),
     }),
   });
 
@@ -133,10 +152,10 @@ export async function uploadWebpBlobToLibrary(
     throw new Error(msg);
   }
 
-  const { uploadUrl, publicUrl, key } =
+  const { uploadUrl, key } =
     (await presignRes.json()) as PresignedUploadResponse;
 
-  if (!uploadUrl || !publicUrl || !key) {
+  if (!uploadUrl || !key) {
     throw new Error("伺服器回傳的上傳憑證不完整");
   }
 
@@ -154,13 +173,13 @@ export async function uploadWebpBlobToLibrary(
     throw new Error(`雲端圖片上傳失敗 (${r2Res.status})`);
   }
 
-  // Step 3: Record { url, key, mailbox } in Supabase via Express API
+  // Step 3: Record ONLY { key, mailbox } in Supabase via Express API
+  // (Server verifies object existence/size/MIME via R2 HeadObject and constructs public URL)
   onPhaseChange?.("saving-record");
   const saveRes = await fetch(`${apiBase}/api/images`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      url: publicUrl,
       key,
       mailbox,
     }),
@@ -182,12 +201,13 @@ export async function uploadWebpBlobToLibrary(
 
 /**
  * Fetches paginated images ordered newest-first from GET ${API_BASE_URL}/api/images.
- * When `post` (1..5) is provided, appends `&post=<N>` to filter strictly by that mailbox.
+ * - Pass `post` (1..5) to filter strictly by that mailbox.
+ * - Pass `"all"` or omit `post` to fetch images from all mailboxes.
  */
 export async function fetchLibraryImages(
   page = 1,
   limit = 24,
-  post?: MailboxNumber | null,
+  post?: MailboxNumber | "all" | null,
   signal?: AbortSignal
 ): Promise<LibraryImagesPageResponse> {
   const apiBase = getApiBaseUrl();

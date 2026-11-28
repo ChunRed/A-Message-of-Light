@@ -2528,7 +2528,7 @@ export const ZFoldLetterScene = forwardRef<
     (e: React.PointerEvent<HTMLDivElement>, forcePull = false) => {
       const st = stateRef.current;
 
-      // Branch 1: Interactive Directional Swipe-Up to Send sealed envelope to Mailbox 1..6
+      // Branch 1: Interactive Directional Swipe-Up to Send sealed envelope to Mailbox 1..5
       if (st.isSendingSequence) {
         if (st.sendSubPhase !== "awaiting-swipe") return;
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -2573,7 +2573,7 @@ export const ZFoldLetterScene = forwardRef<
     (e: React.PointerEvent<HTMLDivElement>) => {
       const st = stateRef.current;
 
-      // Branch 1: Interactive Directional Swipe-Up to Send sealed envelope to Mailbox 1..6
+      // Branch 1: Interactive Directional Swipe-Up to Send sealed envelope to Mailbox 1..5
       if (st.isSendingSequence) {
         if (!st.swipePointerActive || st.sendSubPhase !== "awaiting-swipe") return;
         const nowMs = performance.now();
